@@ -306,6 +306,108 @@ export const FEEDBACK_CSS = `
   transition: background-color 150ms ease;
 }
 
+.fb-up {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.fb-upb {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 150ms ease, opacity 150ms ease;
+  font-family: inherit;
+}
+
+.fb-upb:hover:not(.fb-upb--dis) {
+  background-color: rgba(37, 99, 235, 0.06);
+}
+
+.fb-upb--dis {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.fb-ups {
+  width: 12px;
+  height: 12px;
+  border: 2px solid transparent;
+  border-top: 2px solid currentColor;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  display: inline-block;
+}
+
+.fb-up-extras {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fb-upe {
+  font-size: 12px;
+  color: #dc2626;
+}
+
+.fb-ss {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.fb-sp {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.fb-si {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.fb-sr {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.fb-sr:hover {
+  background: rgba(0, 0, 0, 0.85);
+}
+
+.fb-sl {
+  font-size: 11px;
+  opacity: 0.6;
+}
+
 @media (max-width: 768px) {
   .fb-pnl-base {
     width: 100% !important;

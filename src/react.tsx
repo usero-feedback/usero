@@ -84,6 +84,9 @@ export function UseroFeedbackWidget(props: FeedbackWidgetProps): null {
 		if (props.showEmailOption !== undefined) {
 			updates.showEmailOption = props.showEmailOption
 		}
+		if (props.showScreenshotOption !== undefined) {
+			updates.showScreenshotOption = props.showScreenshotOption
+		}
 		if (props.environment !== undefined) updates.environment = props.environment
 		if (props.metadata !== undefined) updates.metadata = props.metadata
 		handle.update(updates)
@@ -95,6 +98,7 @@ export function UseroFeedbackWidget(props: FeedbackWidgetProps): null {
 		props.title,
 		props.placeholder,
 		props.showEmailOption,
+		props.showScreenshotOption,
 		props.environment,
 		metadataJson,
 	])

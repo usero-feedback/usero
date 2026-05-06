@@ -41,9 +41,18 @@ page.on('pageerror', err => pageErrors.push(err.message))
 
 // Capture the feedback POST
 let feedbackRequest = null
+let screenshotRequest = null
 page.on('request', req => {
 	if (req.url().includes('/api/feedback') && req.method() === 'POST') {
 		feedbackRequest = {
+			url: req.url(),
+			method: req.method(),
+			headers: req.headers(),
+			postData: req.postData(),
+		}
+	}
+	if (req.url().includes('/api/screenshots') && req.method() === 'POST') {
+		screenshotRequest = {
 			url: req.url(),
 			method: req.method(),
 			headers: req.headers(),
@@ -350,6 +359,188 @@ try {
 	} else {
 		record('13b. Mobile panel overflow', 'pass')
 	}
+
+	// 14-17: Screenshot upload flow
+	// Reset to desktop viewport so panel layout is predictable.
+	await page.setViewportSize({ width: 1280, height: 800 })
+	// Tear down + re-init with a fetch stub so /api/screenshots responds with
+	// a fake success and /api/feedback can be inspected. demo-client-id will
+	// 4xx in real prod; stubbing isolates the request-shape assertions.
+	await page.evaluate(() => {
+		document.querySelectorAll('div[data-usero-widget]').forEach(n => n.remove())
+		const realFetch = window.fetch.bind(window)
+		window.__realFetch = realFetch
+		window.__capturedScreenshotForm = null
+		window.fetch = async (input, init) => {
+			const url = typeof input === 'string' ? input : input.url
+			if (url.includes('/api/screenshots')) {
+				const fd = init && init.body instanceof FormData ? init.body : null
+				if (fd) {
+					const file = fd.get('screenshot')
+					window.__capturedScreenshotForm = {
+						clientId: fd.get('clientId'),
+						fileName: file && file.name,
+						fileSize: file && file.size,
+						fileType: file && file.type,
+					}
+				}
+				return new Response(
+					JSON.stringify({
+						success: true,
+						screenshot: {
+							fileName: 'usero-test.png',
+							url: 'https://example.com/usero-test.png',
+							fileSize: 81,
+							mimeType: 'image/png',
+							width: 8,
+							height: 8,
+						},
+					}),
+					{ status: 200, headers: { 'Content-Type': 'application/json' } },
+				)
+			}
+			return realFetch(input, init)
+		}
+		window.Usero.initUseroFeedbackWidget({
+			clientId: 'demo-client-id',
+			position: 'right',
+		})
+	})
+	await page.waitForTimeout(200)
+
+	// Open panel
+	await page.evaluate(() => {
+		const sr = document.querySelector('div[data-usero-widget]').shadowRoot
+		sr.querySelector('.fb-btn').click()
+	})
+	await page.waitForTimeout(250)
+
+	const uploadBtnPresent = await page.evaluate(() => {
+		const sr = document.querySelector('div[data-usero-widget]').shadowRoot
+		return !!sr.querySelector('button[data-role="screenshot-pick"]')
+	})
+	if (uploadBtnPresent) record('14. Upload button present in panel', 'pass')
+	else record('14. Upload button present in panel', 'fail')
+
+	await page.screenshot({ path: `${SHOTS}/05-with-upload.png` })
+
+	// Trigger file pick. The <input type=file> is inside a shadow root, so
+	// page.setInputFiles can't query for it via selector. Instead, grab the
+	// element handle through evaluateHandle.
+	screenshotRequest = null
+	const fileHandle = await page.evaluateHandle(() => {
+		const sr = document.querySelector('div[data-usero-widget]').shadowRoot
+		return sr.querySelector('input[data-role="screenshot-input"]')
+	})
+	await fileHandle.asElement().setInputFiles('/tmp/usero-test.png')
+	await page.waitForTimeout(800)
+
+	const previewState = await page.evaluate(() => {
+		const sr = document.querySelector('div[data-usero-widget]').shadowRoot
+		const previews = sr.querySelectorAll('.fb-sp')
+		const removeBtns = sr.querySelectorAll('button[data-role="screenshot-remove"]')
+		return { previewCount: previews.length, removeBtnCount: removeBtns.length }
+	})
+	const capturedForm = await page.evaluate(() => window.__capturedScreenshotForm)
+	if (
+		previewState.previewCount === 1 &&
+		previewState.removeBtnCount === 1 &&
+		capturedForm &&
+		capturedForm.clientId === 'demo-client-id' &&
+		capturedForm.fileType === 'image/png'
+	) {
+		record('15. Upload triggers POST /api/screenshots + preview', 'pass',
+			JSON.stringify({ previewState, capturedForm }))
+	} else {
+		record('15. Upload triggers POST /api/screenshots + preview', 'fail',
+			JSON.stringify({ previewState, capturedForm, screenshotRequest }))
+	}
+	await page.screenshot({ path: `${SHOTS}/06-preview.png` })
+
+	// Submit feedback and confirm screenshots are attached to the body.
+	feedbackRequest = null
+	await page.evaluate(() => {
+		const sr = document.querySelector('div[data-usero-widget]').shadowRoot
+		sr.querySelector('button[data-rating="3"]').click()
+	})
+	await page.waitForTimeout(150)
+	await page.evaluate(() => {
+		const sr = document.querySelector('div[data-usero-widget]').shadowRoot
+		sr.querySelector('button.fb-sub').click()
+	})
+	await page.waitForTimeout(2500)
+	let feedbackParsed = null
+	try { feedbackParsed = JSON.parse(feedbackRequest?.postData ?? '') } catch {}
+	const screenshotsAttached =
+		feedbackParsed &&
+		Array.isArray(feedbackParsed.screenshots) &&
+		feedbackParsed.screenshots.length === 1 &&
+		feedbackParsed.screenshots[0].url === 'https://example.com/usero-test.png'
+	if (screenshotsAttached) {
+		record('16. POST /api/feedback includes screenshots[]', 'pass',
+			JSON.stringify(feedbackParsed.screenshots))
+	} else {
+		record('16. POST /api/feedback includes screenshots[]', 'fail',
+			JSON.stringify({ feedbackParsed }))
+	}
+
+	// Re-init widget for remove-button + too-large tests.
+	await page.evaluate(() => {
+		document.querySelectorAll('div[data-usero-widget]').forEach(n => n.remove())
+		window.Usero.initUseroFeedbackWidget({
+			clientId: 'demo-client-id',
+			position: 'right',
+		})
+	})
+	await page.waitForTimeout(150)
+	await page.evaluate(() => {
+		const sr = document.querySelector('div[data-usero-widget]').shadowRoot
+		sr.querySelector('.fb-btn').click()
+	})
+	await page.waitForTimeout(200)
+	const fileHandle2 = await page.evaluateHandle(() => {
+		const sr = document.querySelector('div[data-usero-widget]').shadowRoot
+		return sr.querySelector('input[data-role="screenshot-input"]')
+	})
+	await fileHandle2.asElement().setInputFiles('/tmp/usero-test.png')
+	await page.waitForTimeout(700)
+	// Click remove
+	await page.evaluate(() => {
+		const sr = document.querySelector('div[data-usero-widget]').shadowRoot
+		sr.querySelector('button[data-role="screenshot-remove"]').click()
+	})
+	await page.waitForTimeout(200)
+	const afterRemove = await page.evaluate(() => {
+		const sr = document.querySelector('div[data-usero-widget]').shadowRoot
+		return sr.querySelectorAll('.fb-sp').length
+	})
+	if (afterRemove === 0) record('17. Remove button clears preview', 'pass')
+	else record('17. Remove button clears preview', 'fail', `previews=${afterRemove}`)
+
+	// Too-large file: 11MB
+	const fileHandle3 = await page.evaluateHandle(() => {
+		const sr = document.querySelector('div[data-usero-widget]').shadowRoot
+		return sr.querySelector('input[data-role="screenshot-input"]')
+	})
+	await fileHandle3.asElement().setInputFiles('/tmp/usero-too-large.png')
+	await page.waitForTimeout(400)
+	const tooLargeState = await page.evaluate(() => {
+		const sr = document.querySelector('div[data-usero-widget]').shadowRoot
+		const err = sr.querySelector('.fb-upe')
+		const previews = sr.querySelectorAll('.fb-sp').length
+		return { errText: err?.textContent?.trim() ?? null, previews }
+	})
+	await page.screenshot({ path: `${SHOTS}/07-too-large.png` })
+	if (tooLargeState.errText && /10MB|too large|max/i.test(tooLargeState.errText) && tooLargeState.previews === 0) {
+		record('18. Too-large file shows inline error', 'pass', JSON.stringify(tooLargeState))
+	} else {
+		record('18. Too-large file shows inline error', 'fail', JSON.stringify(tooLargeState))
+	}
+
+	// Restore real fetch
+	await page.evaluate(() => {
+		if (window.__realFetch) window.fetch = window.__realFetch
+	})
 
 	// Final: dump leftover console / page errors
 	if (consoleErrors.length || pageErrors.length) {

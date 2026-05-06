@@ -43,6 +43,10 @@ export function App() {
 }
 ```
 
+### Screenshot upload
+
+The widget includes a screenshot upload button by default. Users can attach up to 3 images (max 10MB each, any `image/*` MIME type) to their feedback. Uploads go to `${baseUrl}/api/screenshots` and the resulting URLs are attached to the feedback submission. Disable with `showScreenshotOption: false`.
+
 ### Script tag (CDN)
 
 ```html
@@ -64,7 +68,7 @@ export function App() {
 | `title`                | `string`                      | `'Share Feedback'`                            | Panel header                               |
 | `placeholder`          | `string`                      | `'Tell us what you think... (optional)'`      | Comment placeholder                        |
 | `showEmailOption`      | `boolean`                     | `true`                                        | Show the "share my email" checkbox         |
-| `showScreenshotOption` | `boolean`                     | `true`                                        | Show screenshot upload (React only in v0.1) |
+| `showScreenshotOption` | `boolean`                     | `true`                                        | Show the screenshot upload button (up to 3 images, 10MB each) |
 | `environment`          | `string`                      | undefined                                     | Tag feedback with an environment           |
 | `baseUrl`              | `string`                      | `'https://usero.io'`                          | Override API host (self-hosted Usero)      |
 | `metadata`             | `Record<string, unknown>`     | undefined                                     | Arbitrary metadata attached to feedback    |

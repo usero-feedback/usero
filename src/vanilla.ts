@@ -127,6 +127,7 @@ export function initUseroFeedbackWidget(
 	let title: string = props.title ?? 'Share Feedback'
 	let placeholder: string = props.placeholder ?? 'Tell us what you think... (optional)'
 	let showEmailOption: boolean = props.showEmailOption ?? true
+	let showScreenshotOption: boolean = props.showScreenshotOption ?? true
 	let environment: string | undefined = props.environment
 	let metadata: Record<string, unknown> | undefined = props.metadata
 	let onSubmit: FeedbackWidgetProps['onSubmit'] = props.onSubmit
@@ -144,6 +145,12 @@ export function initUseroFeedbackWidget(
 	let userEmail = readStoredEmail()
 	let isSubmitting = false
 	let submitMessage: { type: 'success' | 'error'; text: string } | null = null
+	let screenshots: ScreenshotData[] = []
+	let isUploadingScreenshot = false
+	let screenshotError: string | null = null
+
+	const MAX_SCREENSHOTS = 3
+	const MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024 // 10MB, matches old React widget
 
 	// Host element on the page. ShadowRoot keeps host CSS isolated.
 	const host = document.createElement('div')
@@ -182,8 +189,47 @@ export function initUseroFeedbackWidget(
 		comment = ''
 		shareEmail = false
 		submitMessage = null
+		screenshots = []
+		screenshotError = null
+		isUploadingScreenshot = false
 		apiClient.ping()
 		onOpen?.()
+		render()
+	}
+
+	async function handleScreenshotFile(file: File): Promise<void> {
+		screenshotError = null
+		if (!file.type.startsWith('image/')) {
+			screenshotError = 'Image files only'
+			render()
+			return
+		}
+		if (file.size > MAX_SCREENSHOT_BYTES) {
+			screenshotError = 'Max 10MB'
+			render()
+			return
+		}
+		if (screenshots.length >= MAX_SCREENSHOTS) {
+			screenshotError = `Max ${MAX_SCREENSHOTS} screenshots`
+			render()
+			return
+		}
+
+		isUploadingScreenshot = true
+		render()
+		try {
+			const uploaded = await apiClient.uploadScreenshot(file, clientId)
+			screenshots = [...screenshots, uploaded]
+		} catch (err) {
+			screenshotError = err instanceof Error ? err.message : 'Upload failed'
+		} finally {
+			isUploadingScreenshot = false
+			render()
+		}
+	}
+
+	function removeScreenshot(index: number): void {
+		screenshots = screenshots.filter((_, i) => i !== index)
 		render()
 	}
 
@@ -204,6 +250,7 @@ export function initUseroFeedbackWidget(
 			rating: selectedRating,
 			comment: comment.trim() || undefined,
 			userEmail: shareEmail ? userEmail : undefined,
+			screenshots: screenshots.length > 0 ? screenshots : undefined,
 			metadata: {
 				pageUrl: window.location.href,
 				pageTitle: document.title || 'Untitled Page',
@@ -222,6 +269,7 @@ export function initUseroFeedbackWidget(
 			referrer: feedbackData.metadata.referrer,
 			environment,
 		}
+		if (screenshots.length > 0) submission.screenshots = screenshots
 		if (metadata !== undefined) submission.metadata = metadata
 
 		const validation = validateFeedbackSubmission(submission)
@@ -239,6 +287,8 @@ export function initUseroFeedbackWidget(
 				selectedRating = undefined
 				comment = ''
 				shareEmail = false
+				screenshots = []
+				screenshotError = null
 				submitMessage = { type: 'success', text: 'Thank you!' }
 			} else {
 				const msg = response.error ?? 'Error occurred. Try again.'
@@ -311,6 +361,50 @@ export function initUseroFeedbackWidget(
 			? `<div class="fb-msg fb-msg--header ${submitMessage.type === 'success' ? 'fb-msg--ok' : 'fb-msg--err'}">${submitMessage.type === 'success' ? '✓' : '⚠'} ${escapeHtml(submitMessage.text)}</div>`
 			: ''
 
+		const screenshotBlockHtml = showScreenshotOption
+			? (() => {
+					const atMax = screenshots.length >= MAX_SCREENSHOTS
+					const btnDisabled = isUploadingScreenshot || atMax
+					const previewsHtml = screenshots
+						.map(
+							(shot, i) => `
+								<div class="fb-sp">
+									<img src="${escapeHtml(shot.url)}" alt="Screenshot ${i + 1}" class="fb-si" />
+									<button type="button" class="fb-sr" data-role="screenshot-remove" data-index="${i}" aria-label="Remove screenshot">✕</button>
+								</div>
+							`,
+						)
+						.join('')
+					const errorHtml = screenshotError
+						? `<div class="fb-upe">⚠ ${escapeHtml(screenshotError)}</div>`
+						: ''
+					const limitHtml = atMax
+						? `<div class="fb-sl">Max ${MAX_SCREENSHOTS}</div>`
+						: ''
+					const extrasHtml =
+						screenshotError || screenshots.length > 0 || atMax
+							? `<div class="fb-up-extras">${errorHtml}${
+									screenshots.length > 0
+										? `<div class="fb-ss">${previewsHtml}</div>`
+										: ''
+								}${limitHtml}</div>`
+							: ''
+					return `
+						<div class="fb-up">
+							<input type="file" accept="image/*" data-role="screenshot-input" style="display:none;" aria-label="Choose screenshot" />
+							<button type="button" class="fb-upb ${btnDisabled ? 'fb-upb--dis' : ''}" data-role="screenshot-pick" ${btnDisabled ? 'disabled' : ''} style="border:1px solid ${theme.border};color:${theme.text};">
+								${
+									isUploadingScreenshot
+										? '<span class="fb-ups"></span> Uploading...'
+										: '📷 Add screenshot'
+								}
+							</button>
+							${extrasHtml}
+						</div>
+					`
+				})()
+			: ''
+
 		const emailBlockHtml = showEmailOption
 			? `
 				<div class="fb-email">
@@ -345,6 +439,7 @@ export function initUseroFeedbackWidget(
 							${remaining} chars remaining
 						</div>
 					</div>
+					${screenshotBlockHtml}
 					${emailBlockHtml}
 					<button class="fb-sub ${submitDisabled ? 'fb-sub--dis' : ''}" type="submit" aria-label="Submit" ${submitDisabled ? 'disabled' : ''} style="${submitStyle}">
 						${isSubmitting ? '<span class="fb-spin"></span>' : ''}
@@ -414,6 +509,33 @@ export function initUseroFeedbackWidget(
 				userEmail = emailInp.value
 			}
 		})
+
+		const fileInput = panelEl.querySelector<HTMLInputElement>(
+			'input[data-role="screenshot-input"]',
+		)
+		const pickBtn = panelEl.querySelector<HTMLButtonElement>(
+			'button[data-role="screenshot-pick"]',
+		)
+		pickBtn?.addEventListener('click', () => {
+			fileInput?.click()
+		})
+		fileInput?.addEventListener('change', () => {
+			const file = fileInput.files?.[0]
+			if (!file) return
+			void handleScreenshotFile(file).finally(() => {
+				if (fileInput) fileInput.value = ''
+			})
+		})
+		panelEl
+			.querySelectorAll<HTMLButtonElement>(
+				'button[data-role="screenshot-remove"]',
+			)
+			.forEach(btn => {
+				btn.addEventListener('click', () => {
+					const idx = Number(btn.dataset.index)
+					if (Number.isInteger(idx)) removeScreenshot(idx)
+				})
+			})
 	}
 
 	function render(): void {
@@ -476,6 +598,13 @@ export function initUseroFeedbackWidget(
 				next.showEmailOption !== showEmailOption
 			) {
 				showEmailOption = next.showEmailOption
+				needsRender = true
+			}
+			if (
+				next.showScreenshotOption !== undefined &&
+				next.showScreenshotOption !== showScreenshotOption
+			) {
+				showScreenshotOption = next.showScreenshotOption
 				needsRender = true
 			}
 			// Non-render-affecting props: just swap refs.
