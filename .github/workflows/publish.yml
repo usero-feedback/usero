@@ -78,11 +78,7 @@ jobs:
       - name: Publish (dry run)
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run == true
         run: npm publish --access public --dry-run
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish
         if: inputs.dry_run != true && steps.check.outputs.already_published != 'true'
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
