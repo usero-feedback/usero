@@ -34,6 +34,27 @@ export {
 	DEFAULT_THEME,
 	mergeTheme,
 }
+
+// Pick the base theme to merge user overrides onto, based on the OS color
+// scheme. Defaults to dark when matchMedia is unavailable (SSR, old browsers)
+// or when neither dark nor light is explicitly preferred.
+function resolveBaseTheme(): WidgetTheme {
+	if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+		return DARK_THEME
+	}
+	if (window.matchMedia('(prefers-color-scheme: dark)').matches) return DARK_THEME
+	if (window.matchMedia('(prefers-color-scheme: light)').matches) return DEFAULT_THEME
+	return DARK_THEME
+}
+
+// Resolve the effective theme. If the caller passed a partial theme, it wins
+// per-key over the OS-resolved base. If they passed nothing, we just use the
+// OS-resolved base directly.
+export function resolveTheme(userTheme: Partial<WidgetTheme> | undefined): WidgetTheme {
+	const base = resolveBaseTheme()
+	if (!userTheme) return base
+	return { ...base, ...userTheme }
+}
 export type {
 	FeedbackData,
 	FeedbackRating,
@@ -123,7 +144,8 @@ export function initUseroFeedbackWidget(
 	// these at render time, never destructure into local const above the
 	// render closures or you'll capture stale values.
 	let position: WidgetPosition = props.position ?? 'right'
-	let theme: WidgetTheme = mergeTheme(props.theme)
+	let userThemeOverride: Partial<WidgetTheme> | undefined = props.theme
+	let theme: WidgetTheme = resolveTheme(userThemeOverride)
 	let title: string = props.title ?? 'Share Feedback'
 	let placeholder: string = props.placeholder ?? 'Tell us what you think... (optional)'
 	let showEmailOption: boolean = props.showEmailOption ?? true
@@ -434,11 +456,7 @@ export function initUseroFeedbackWidget(
 				<form data-role="form">
 					<div class="fb-es" role="radiogroup" aria-label="Rate experience">${ratingsHtml}</div>
 					<textarea class="fb-ta" data-role="comment" placeholder="${escapeHtml(placeholder)}" aria-label="Comments" maxlength="1000" rows="2" style="border:1px solid ${theme.border};color:${theme.text};background-color:${theme.background};">${escapeHtml(comment)}</textarea>
-					<div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
-						<div style="font-size:12px;color:${lowChars ? '#dc2626' : theme.text};opacity:${lowChars ? 1 : 0.6};margin-left:auto;">
-							${remaining} chars remaining
-						</div>
-					</div>
+					<div class="fb-charcount${lowChars ? ' fb-charcount--low' : ''}" data-role="charcount" style="color:${lowChars ? '#dc2626' : theme.text};opacity:${lowChars ? 1 : 0.6};">${remaining} chars remaining</div>
 					${screenshotBlockHtml}
 					${emailBlockHtml}
 					<button class="fb-sub ${submitDisabled ? 'fb-sub--dis' : ''}" type="submit" aria-label="Submit" ${submitDisabled ? 'disabled' : ''} style="${submitStyle}">
@@ -480,8 +498,11 @@ export function initUseroFeedbackWidget(
 				if (textarea.value.length <= 1000) {
 					comment = textarea.value
 					// Update char count without full rerender to avoid losing focus.
+					// IMPORTANT: target by stable class. A previous selector
+					// `.fb-cnt form > div > div` matched the first rating tile,
+					// hijacking it with the char-count text on every keystroke.
 					const counter = panelEl.querySelector<HTMLDivElement>(
-						'.fb-cnt form > div > div',
+						'[data-role="charcount"]',
 					)
 					if (counter) {
 						const left = 1000 - comment.length
@@ -561,6 +582,35 @@ export function initUseroFeedbackWidget(
 	}
 	document.addEventListener('keydown', onKeyDown)
 
+	// Live OS color-scheme tracking. Only active while the caller has not
+	// provided an explicit `theme` prop. If they later pass one via update(),
+	// we detach. If they later clear it (set to undefined), we re-attach.
+	let darkMql: MediaQueryList | null = null
+	let mqlListener: ((ev: MediaQueryListEvent) => void) | null = null
+
+	function detachMqlListener(): void {
+		if (darkMql && mqlListener) {
+			darkMql.removeEventListener('change', mqlListener)
+		}
+		darkMql = null
+		mqlListener = null
+	}
+
+	function attachMqlListener(): void {
+		if (darkMql) return
+		if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+		darkMql = window.matchMedia('(prefers-color-scheme: dark)')
+		mqlListener = () => {
+			// Only react if user still hasn't overridden the theme.
+			if (userThemeOverride !== undefined) return
+			theme = resolveTheme(undefined)
+			render()
+		}
+		darkMql.addEventListener('change', mqlListener)
+	}
+
+	if (userThemeOverride === undefined) attachMqlListener()
+
 	// Initial paint
 	render()
 
@@ -570,6 +620,7 @@ export function initUseroFeedbackWidget(
 			if (destroyed) return
 			destroyed = true
 			document.removeEventListener('keydown', onKeyDown)
+			detachMqlListener()
 			host.remove()
 		},
 		open,
@@ -581,8 +632,14 @@ export function initUseroFeedbackWidget(
 				position = next.position
 				needsRender = true
 			}
-			if (next.theme !== undefined) {
-				theme = mergeTheme(next.theme)
+			if ('theme' in next) {
+				// Caller opted in/out of explicit theme control. Track the
+				// override so the matchMedia listener and any further
+				// resolutions know whether the user is in charge.
+				userThemeOverride = next.theme
+				theme = resolveTheme(userThemeOverride)
+				if (userThemeOverride === undefined) attachMqlListener()
+				else detachMqlListener()
 				needsRender = true
 			}
 			if (next.title !== undefined && next.title !== title) {

@@ -58,13 +58,17 @@ The widget includes a screenshot upload button by default. Users can attach up t
 
 `unpkg` and `jsDelivr` both serve the IIFE bundle automatically. No separate hosting needed.
 
+## Theme
+
+The widget auto-detects the OS color scheme via `prefers-color-scheme`. It picks the built-in dark theme on dark systems and the light theme on light systems, and swaps live if the user toggles modes while the widget is open. When no preference is reported (older browsers, SSR), it defaults to dark. Pass an explicit `theme` to override; explicit values always win, and partial overrides merge on top of the OS-resolved base.
+
 ## Options
 
 | Option                 | Type                          | Default                                       | Description                                |
 | ---------------------- | ----------------------------- | --------------------------------------------- | ------------------------------------------ |
 | `clientId`             | `string`                      | required                                      | Your Usero client ID                       |
 | `position`             | `'left' \| 'right'`           | `'right'`                                     | Which side of the viewport the tab sits on |
-| `theme`                | `Partial<WidgetTheme>`        | light theme                                   | Override colors                            |
+| `theme`                | `Partial<WidgetTheme>`        | auto (OS color scheme, dark fallback)         | Override colors. Wins over auto-detection  |
 | `title`                | `string`                      | `'Share Feedback'`                            | Panel header                               |
 | `placeholder`          | `string`                      | `'Tell us what you think... (optional)'`      | Comment placeholder                        |
 | `showEmailOption`      | `boolean`                     | `true`                                        | Show the "share my email" checkbox         |

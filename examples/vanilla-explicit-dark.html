@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang='en'>
+  <head>
+    <meta charset='utf-8' />
+    <title>Usero vanilla smoke test (explicit dark theme)</title>
+  </head>
+  <body>
+    <h1>Explicit DARK_THEME</h1>
+    <p>Even in light OS mode this should stay dark.</p>
+
+    <script src='../dist/usero.iife.js'></script>
+    <script>
+      window.Usero.initUseroFeedbackWidget({
+        clientId: 'demo-client-id',
+        position: 'right',
+        theme: window.Usero.DARK_THEME,
+      })
+    </script>
+  </body>
+</html>
