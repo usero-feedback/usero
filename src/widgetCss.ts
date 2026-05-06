@@ -13,8 +13,8 @@ export const FEEDBACK_CSS = `
 .fb-es {
   display: flex;
   justify-content: center;
-  gap: 15px;
-  padding-bottom: 10px;
+  gap: 12px;
+  padding-bottom: 8px;
 }
 
 .fb-ec {
@@ -105,7 +105,7 @@ export const FEEDBACK_CSS = `
 
 .fb-sub {
   width: 100%;
-  padding: 16px 24px;
+  padding: 12px 24px;
   border: none;
   border-radius: 12px;
   font-size: 15px;
@@ -133,7 +133,7 @@ export const FEEDBACK_CSS = `
 }
 
 .fb-cnt {
-  padding: 24px;
+  padding: 20px 24px 16px;
   overflow: auto;
   max-height: calc(90vh - 48px);
 }
@@ -146,22 +146,22 @@ export const FEEDBACK_CSS = `
 
 .fb-ta {
   width: 100%;
-  min-height: 100px;
-  padding: 12px;
+  min-height: 80px;
+  padding: 10px;
   border-radius: 8px;
   font-size: 14px;
   font-family: inherit;
   outline: none;
   resize: vertical;
   transition: border-color 150ms ease;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
   box-sizing: border-box;
 }
 
 .fb-charcount {
   font-size: 12px;
   margin-left: auto;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
   text-align: right;
 }
 
@@ -172,8 +172,8 @@ export const FEEDBACK_CSS = `
 .fb-email {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-bottom: 16px;
+  gap: 6px;
+  margin-bottom: 10px;
 }
 
 .fb-email-lbl {
@@ -309,8 +309,8 @@ export const FEEDBACK_CSS = `
 .fb-up {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-bottom: 12px;
+  gap: 6px;
+  margin-bottom: 8px;
 }
 
 .fb-upb {
@@ -412,15 +412,15 @@ export const FEEDBACK_CSS = `
   .fb-pnl-base {
     width: 100% !important;
     max-width: none !important;
-    top: 5vh !important;
-    max-height: 70vh !important;
+    top: 4vh !important;
+    max-height: 92vh !important;
   }
-  .fb-cnt { padding: 20px !important; max-height: calc(100vh - 80px) !important; }
-  .fb-ta { font-size: 16px !important; min-height: 80px !important; }
+  .fb-cnt { padding: 16px 18px 14px !important; max-height: calc(100vh - 40px) !important; }
+  .fb-ta { font-size: 16px !important; min-height: 64px !important; }
   .fb-ttl { font-size: 18px !important; }
   .fb-ei { font-size: 24px !important; }
   .fb-el { font-size: 11px !important; }
-  .fb-sub { padding: 14px 20px !important; font-size: 16px !important; }
+  .fb-sub { padding: 12px 20px !important; font-size: 16px !important; }
 }
 `
 
