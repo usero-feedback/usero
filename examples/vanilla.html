@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang='en'>
+  <head>
+    <meta charset='utf-8' />
+    <title>Usero vanilla smoke test</title>
+  </head>
+  <body>
+    <h1>Usero vanilla embed</h1>
+    <p>The widget should appear pinned to the right edge.</p>
+
+    <!-- For the smoke test we point at the local IIFE build. In production
+         you'd use https://unpkg.com/usero instead. -->
+    <script src='../dist/usero.iife.js'></script>
+    <script>
+      window.Usero.initUseroFeedbackWidget({
+        clientId: 'demo-client-id',
+        position: 'right',
+      })
+    </script>
+  </body>
+</html>
