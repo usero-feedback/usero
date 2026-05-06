@@ -13,8 +13,8 @@
 		"noEmit": true,
 		"baseUrl": "..",
 		"paths": {
-			"usero": ["./dist/vanilla.d.ts"],
-			"usero/react": ["./dist/react.d.ts"]
+			"@usero/sdk": ["./dist/vanilla.d.ts"],
+			"@usero/sdk/react": ["./dist/react.d.ts"]
 		}
 	},
 	"include": ["consumer.test.ts"]

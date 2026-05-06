@@ -1,16 +1,16 @@
 {
-  "name": "usero",
+  "name": "@usero/sdk",
   "version": "0.1.0",
-  "description": "Lightweight feedback widget for the web. Drop-in vanilla JS, React component, or script tag. Zero config, framework-free, tiny.",
+  "description": "Usero SDK. Drop-in feedback widget (vanilla JS, React, or script tag) plus future plugins like session replay. Zero config, framework-free, tiny.",
   "license": "MIT",
   "author": "Will Smith <will@willsmithte.com>",
   "homepage": "https://usero.io",
   "repository": {
     "type": "git",
-    "url": "https://github.com/usero/usero.git"
+    "url": "https://github.com/usero-feedback/usero.git"
   },
   "bugs": {
-    "url": "https://github.com/usero/usero/issues"
+    "url": "https://github.com/usero-feedback/usero/issues"
   },
   "type": "module",
   "main": "./dist/vanilla.cjs",

@@ -7,7 +7,7 @@ Backed by [Usero](https://usero.io). Sign up to get a `clientId`.
 ## Install
 
 ```bash
-npm install usero
+npm install @usero/sdk
 ```
 
 ## Usage
@@ -15,7 +15,7 @@ npm install usero
 ### Vanilla JS (any framework, or none)
 
 ```ts
-import { initUseroFeedbackWidget } from 'usero'
+import { initUseroFeedbackWidget } from '@usero/sdk'
 
 const widget = initUseroFeedbackWidget({
   clientId: 'YOUR_CLIENT_ID',
@@ -31,7 +31,7 @@ The vanilla build never imports React. Vue, Svelte, Angular, plain HTML, and Ele
 ### React
 
 ```tsx
-import { UseroFeedbackWidget } from 'usero/react'
+import { UseroFeedbackWidget } from '@usero/sdk/react'
 
 export function App() {
   return (
@@ -50,7 +50,7 @@ The widget includes a screenshot upload button by default. Users can attach up t
 ### Script tag (CDN)
 
 ```html
-<script src="https://unpkg.com/usero"></script>
+<script src="https://unpkg.com/@usero/sdk"></script>
 <script>
   Usero.initUseroFeedbackWidget({ clientId: 'YOUR_CLIENT_ID' })
 </script>
@@ -82,7 +82,7 @@ Default exports break tree-shaking and rename inconsistently across consumer cod
 
 ## Why subpath exports
 
-Bundlers can tree-shake well, but `usero/react` vs `usero` is a guarantee, not a hope. Vanilla users never pull React into their bundle.
+Bundlers can tree-shake well, but `@usero/sdk/react` vs `@usero/sdk` is a guarantee, not a hope. Vanilla users never pull React into their bundle.
 
 ## Building from source
 

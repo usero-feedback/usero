@@ -3,13 +3,13 @@
 // it confirms that the `exports` map resolves correctly for both entries
 // and that the published .d.ts files type-check from the outside.
 
-import { initUseroFeedbackWidget } from 'usero'
+import { initUseroFeedbackWidget } from '@usero/sdk'
 import type {
 	FeedbackWidgetProps,
 	UseroWidgetHandle,
-} from 'usero'
-import { UseroFeedbackWidget } from 'usero/react'
-import type { FeedbackWidgetProps as ReactProps } from 'usero/react'
+} from '@usero/sdk'
+import { UseroFeedbackWidget } from '@usero/sdk/react'
+import type { FeedbackWidgetProps as ReactProps } from '@usero/sdk/react'
 
 declare const propsA: FeedbackWidgetProps
 declare const propsB: ReactProps
