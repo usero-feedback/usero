@@ -1,0 +1,88 @@
+name: Publish to npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump"
+        required: true
+        default: "patch"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      dry_run:
+        description: "Dry run (no version bump, no publish)"
+        required: false
+        default: false
+        type: boolean
+      skip_bump:
+        description: "Skip version bump (publish current package.json version)"
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches:
+      - main
+    paths:
+      - "package.json"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - run: npm install -g npm@11.5.1
+
+      - name: Check if version is already published
+        id: check
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "already_published=true" >> $GITHUB_OUTPUT
+            echo "$NAME@$VERSION already on npm, skipping."
+          else
+            echo "already_published=false" >> $GITHUB_OUTPUT
+          fi
+
+      - if: steps.check.outputs.already_published != 'true'
+        run: npm ci
+
+      - if: steps.check.outputs.already_published != 'true'
+        run: npm run build
+
+      - name: Bump version (manual dispatch only)
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run != true && inputs.skip_bump != true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          npm version ${{ inputs.bump }} -m "Release %s"
+          git push --follow-tags
+
+      - name: Publish (dry run)
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run == true
+        run: npm publish --access public --dry-run
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish
+        if: inputs.dry_run != true && steps.check.outputs.already_published != 'true'
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
