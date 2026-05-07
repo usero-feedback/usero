@@ -14,7 +14,8 @@
 		"baseUrl": "..",
 		"paths": {
 			"@usero/sdk": ["./dist/vanilla.d.ts"],
-			"@usero/sdk/react": ["./dist/react.d.ts"]
+			"@usero/sdk/react": ["./dist/react.d.ts"],
+			"@usero/sdk/plugins/session-replay": ["./dist/plugins/session-replay.d.ts"]
 		}
 	},
 	"include": ["consumer.test.ts"]

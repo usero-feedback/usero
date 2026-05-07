@@ -41,7 +41,26 @@ export default defineConfig([
 			js: format === 'cjs' ? '.cjs' : '.js',
 		}),
 	},
-	// 3. IIFE for <script> tag (vanilla only, no react)
+	// 3. Session replay plugin -> ESM + CJS + types. Marked external so it
+	// stays a separate chunk and consumers who don't import it pay zero
+	// bundle cost. rrweb is also external — it's lazy-loaded at runtime
+	// via dynamic `import('rrweb')` and is a peer/optional dep of the
+	// plugin entry.
+	{
+		entry: { 'plugins/session-replay': 'src/plugins/session-replay.ts' },
+		format: ['esm', 'cjs'],
+		dts: true,
+		sourcemap: true,
+		clean: false,
+		treeshake: true,
+		platform: 'browser',
+		target: 'es2020',
+		external: ['react', 'react-dom', 'rrweb'],
+		outExtension: ({ format }) => ({
+			js: format === 'cjs' ? '.cjs' : '.js',
+		}),
+	},
+	// 4. IIFE for <script> tag (vanilla only, no react)
 	{
 		entry: { 'usero.iife': 'src/vanilla.ts' },
 		format: ['iife'],

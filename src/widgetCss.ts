@@ -158,10 +158,17 @@ export const FEEDBACK_CSS = `
   box-sizing: border-box;
 }
 
+.fb-toolrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
 .fb-charcount {
   font-size: 12px;
   margin-left: auto;
-  margin-bottom: 6px;
   text-align: right;
 }
 
