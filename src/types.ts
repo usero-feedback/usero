@@ -30,6 +30,10 @@ export interface FeedbackSubmission {
 	environment?: string
 	screenshots?: ScreenshotData[]
 	metadata?: Record<string, unknown>
+	// Gzipped + base64-encoded rrweb event stream attached by the
+	// session-replay plugin. Optional, only present when that plugin is
+	// installed and has buffered events at submission time.
+	replayEvents?: string
 }
 
 export interface FeedbackData {
@@ -50,6 +54,10 @@ export interface WidgetTheme {
 	shadow: string
 }
 
+// Forward-declared to avoid a circular import. The plugin module imports
+// FeedbackSubmission from this file, so we can't import UseroPlugin back
+// up here without a cycle. Keeping the prop typed as an opaque object with
+// the minimal shape the widget actually inspects works fine for consumers.
 export interface FeedbackWidgetProps {
 	clientId: string
 	position?: WidgetPosition
@@ -61,6 +69,7 @@ export interface FeedbackWidgetProps {
 	environment?: string
 	baseUrl?: string
 	metadata?: Record<string, unknown>
+	plugins?: ReadonlyArray<import('./plugin').UseroPlugin>
 	onSubmit?: (feedback: FeedbackData) => void
 	onError?: (error: Error) => void
 	onOpen?: () => void

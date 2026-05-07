@@ -80,6 +80,91 @@ The widget auto-detects the OS color scheme via `prefers-color-scheme`. It picks
 | `onError`              | `(err: Error) => void`        | undefined                                     | Fires on init or submission error          |
 | `onOpen` / `onClose`   | `() => void`                  | undefined                                     | Fire when the panel opens/closes           |
 
+## Plugins
+
+The widget has a tiny plugin API for opt-in features that would otherwise bloat the base bundle. Plugins live in subpath exports so the base widget stays small for everyone who doesn't use them.
+
+### Session replay
+
+Attaches a rolling rrweb buffer (last 30 seconds by default) to each feedback submission, gzipped via the native CompressionStream API.
+
+`rrweb` ships inside the plugin chunk, so `npm install @usero/sdk` is the only install step. The plugin entry is a separate subpath export, so consumers who never `import` it pay zero rrweb bytes on the base bundle.
+
+```ts
+import { initUseroFeedbackWidget } from '@usero/sdk'
+import { sessionReplay } from '@usero/sdk/plugins/session-replay'
+
+initUseroFeedbackWidget({
+  clientId: 'YOUR_CLIENT_ID',
+  plugins: [
+    sessionReplay({
+      bufferSeconds: 30,
+      // Wait 3s of engagement before loading rrweb. If the user navigates
+      // away first, rrweb is never fetched.
+      startAfterMs: 3000,
+      // Sample 50% of sessions. Decided once at init via Math.random().
+      sampleRate: 0.5,
+    }),
+  ],
+})
+```
+
+The base bundle (`@usero/sdk` and `@usero/sdk/react`) has zero rrweb references. Importing the plugin pulls in a separate chunk, and `rrweb` itself lazy-loads at runtime via dynamic import the first time the engagement gate elapses, so even consumers who DO opt into the plugin don't pay rrweb's bytes upfront.
+
+#### Privacy defaults
+
+| Option              | Default                | What it does                                                  |
+| ------------------- | ---------------------- | ------------------------------------------------------------- |
+| `maskAllInputs`     | `true`                 | Mask `<input>` and `<textarea>` values in the recording       |
+| `maskTextSelector`  | `'[data-usero-mask]'`  | Mask text content of any node matching this selector          |
+| `blockSelector`     | `'[data-usero-block]'` | Skip recording subtrees entirely                              |
+| `inlineStylesheet`  | `true`                 | Inline external stylesheets so replays render offline         |
+| `sampling`          | `{ mousemove: 50, scroll: 100 }` | Throttle high-frequency events                  |
+| `bufferSeconds`     | `30`                   | Length of the rolling in-memory buffer in seconds             |
+| `startAfterMs`      | `0`                    | Engagement gate before loading rrweb                          |
+| `sampleRate`        | `1`                    | Probability (0..1) that a given session records at all        |
+
+Tag any DOM node you want masked at the source: `<div data-usero-mask>...</div>`. Tag entire subtrees you want skipped with `data-usero-block`.
+
+### Writing your own plugin
+
+```ts
+import type { UseroPlugin } from '@usero/sdk'
+
+export function consoleCapture(): UseroPlugin {
+  return {
+    name: 'console-capture',
+    onInit(ctx) {
+      const logs: string[] = []
+      ctx.setStore(logs)
+      const original = console.log
+      console.log = (...args) => {
+        logs.push(args.map(String).join(' '))
+        original(...args)
+      }
+    },
+    onFeedbackSubmit(ctx) {
+      const logs = ctx.getStore<string[]>() ?? []
+      return { metadata: { recentLogs: logs.slice(-50) } }
+    },
+  }
+}
+```
+
+Plugins return a `Partial<FeedbackSubmission>` from `onFeedbackSubmit`. Top-level keys are shallow-merged into the outgoing payload (later plugins win wholesale). `metadata` is deep-merged one level so multiple plugins can each contribute their own metadata keys without clobbering each other.
+
+### `widget.whenReady()`
+
+`initUseroFeedbackWidget` returns a handle with a `whenReady(): Promise<void>` method that resolves once every plugin's `onInit` has settled (fulfilled or rejected — a misbehaving plugin never blocks readiness). It's intended for end-to-end tests and dogfooding scripts that want to trigger a synthetic submit only after all plugins are live:
+
+```ts
+const widget = initUseroFeedbackWidget({ clientId, plugins: [sessionReplay()] })
+await widget.whenReady()
+widget.open()
+```
+
+If no plugins are registered, `whenReady()` resolves immediately.
+
 ## Why named exports only
 
 Default exports break tree-shaking and rename inconsistently across consumer codebases. The package exports nothing as a default, anywhere, on purpose.
@@ -99,6 +184,7 @@ Outputs:
 
 - `dist/vanilla.js` (ESM) + `dist/vanilla.cjs` + `dist/vanilla.d.ts`
 - `dist/react.js` (ESM) + `dist/react.cjs` + `dist/react.d.ts`
+- `dist/plugins/session-replay.js` (ESM) + `.cjs` + `.d.ts` plus a sibling `dist/all-*.js` chunk that holds the bundled rrweb runtime. The plugin loads this chunk via dynamic `import()` so it only downloads when the plugin actually needs it.
 - `dist/usero.iife.js` (minified, exposes `window.Usero`)
 
 ## License

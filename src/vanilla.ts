@@ -12,6 +12,12 @@
 import { FeedbackApiClient } from './api'
 import { getGradientEnd } from './colorUtils'
 import {
+	createPluginLogger,
+	type PluginContext,
+	type UseroPlugin,
+} from './plugin'
+import { DEFAULT_API_URL } from './types'
+import {
 	DARK_THEME,
 	DEFAULT_THEME,
 	EMOJI_BACKGROUNDS,
@@ -64,6 +70,11 @@ export type {
 	WidgetPosition,
 	WidgetTheme,
 } from './types'
+export type {
+	PluginContext,
+	PluginLogger,
+	UseroPlugin,
+} from './plugin'
 
 export interface UseroWidgetHandle {
 	destroy: () => void
@@ -75,6 +86,12 @@ export interface UseroWidgetHandle {
 	// wrapper) typically route callbacks through this so identity changes on
 	// re-render don't force a tear-down.
 	update: (next: Partial<Omit<FeedbackWidgetProps, 'clientId' | 'baseUrl'>>) => void
+	// Resolves once every plugin's `onInit` promise has settled (fulfilled
+	// OR rejected). Intended for end-to-end tests and dogfooding scripts
+	// that want to trigger a synthetic submit only after plugins are live.
+	// Plugins with synchronous `onInit` make this resolve on the next
+	// microtask. If no plugins are registered, it resolves immediately.
+	whenReady: () => Promise<void>
 }
 
 const EMAIL_STORAGE_KEY = 'feedback_user_email'
@@ -96,6 +113,32 @@ function escapeHtml(value: string): string {
 				return ch
 		}
 	})
+}
+
+// Merge plugin onFeedbackSubmit patches into a base submission.
+//
+// Top-level keys: shallow-merge, later patches win wholesale.
+// `metadata`: deep-merge one level. Earlier keys are preserved when later
+// patches don't set them; later keys win on conflict. This means two
+// plugins can both contribute `metadata: { ... }` without either erasing
+// the other's keys.
+export function mergePluginPatches(
+	base: FeedbackSubmission,
+	patches: ReadonlyArray<Partial<FeedbackSubmission> | undefined>,
+): FeedbackSubmission {
+	let result: FeedbackSubmission = base
+	for (const patch of patches) {
+		if (!patch || typeof patch !== 'object') continue
+		const { metadata: patchMetadata, ...rest } = patch
+		result = { ...result, ...rest }
+		if (patchMetadata && typeof patchMetadata === 'object') {
+			result.metadata = {
+				...(result.metadata ?? {}),
+				...patchMetadata,
+			}
+		}
+	}
+	return result
 }
 
 function readStoredEmail(): string {
@@ -124,6 +167,7 @@ export function initUseroFeedbackWidget(
 			open: () => {},
 			close: () => {},
 			update: () => {},
+			whenReady: () => Promise.resolve(),
 		}
 	}
 
@@ -137,6 +181,7 @@ export function initUseroFeedbackWidget(
 			open: () => {},
 			close: () => {},
 			update: () => {},
+			whenReady: () => Promise.resolve(),
 		}
 	}
 
@@ -158,6 +203,42 @@ export function initUseroFeedbackWidget(
 	let onClose: FeedbackWidgetProps['onClose'] = props.onClose
 
 	const apiClient = new FeedbackApiClient(baseUrl)
+
+	// Plugin registry. Each plugin gets its own context with a private store.
+	// `onInit` is fired non-blocking so a slow plugin can't delay the first
+	// paint. Errors are caught so a misbehaving plugin can't tear the widget
+	// down or block submissions.
+	const pluginList: ReadonlyArray<UseroPlugin> = props.plugins ?? []
+	const pluginStores = new Map<string, unknown>()
+	const pluginContexts = new Map<string, PluginContext>()
+	// Tracks every onInit's settlement so `whenReady()` can resolve only
+	// after all plugins have finished initializing. Synchronous onInits
+	// resolve on the next microtask via Promise.resolve().
+	const initPromises: Promise<void>[] = []
+	for (const plugin of pluginList) {
+		const ctx: PluginContext = {
+			clientId,
+			baseUrl: baseUrl ?? DEFAULT_API_URL,
+			logger: createPluginLogger(plugin.name),
+			getStore: <T,>() => pluginStores.get(plugin.name) as T | undefined,
+			setStore: <T,>(value: T) => {
+				pluginStores.set(plugin.name, value)
+			},
+		}
+		pluginContexts.set(plugin.name, ctx)
+		if (plugin.onInit) {
+			const settled = (async () => {
+				try {
+					await plugin.onInit?.(ctx)
+				} catch (err) {
+					ctx.logger.error('onInit threw', err)
+				}
+			})()
+			initPromises.push(settled)
+		}
+	}
+	const readyPromise: Promise<void> =
+		initPromises.length === 0 ? Promise.resolve() : Promise.all(initPromises).then(() => {})
 
 	// State
 	let isOpen = false
@@ -301,8 +382,38 @@ export function initUseroFeedbackWidget(
 			return
 		}
 
+		// Run plugin onFeedbackSubmit hooks in parallel and merge the
+		// returned partial payloads into the outgoing submission. A plugin
+		// that throws or rejects is logged and skipped — never blocks submit.
+		//
+		// Merge policy:
+		//   - `metadata` is DEEP-merged (one level): later plugins' keys
+		//     win on conflict, but non-conflicting keys from earlier
+		//     plugins are preserved. metadata is the natural collision
+		//     point (every plugin wants to attach context) so deep merge
+		//     is what users expect.
+		//   - Every other top-level key is shallow-merged: later plugins
+		//     win wholesale. This is fine in practice because dedicated
+		//     keys like `replayEvents` have a single writer.
+		let enrichedSubmission: FeedbackSubmission = submission
+		if (pluginList.length > 0) {
+			const patchPromises = pluginList.map(async plugin => {
+				if (!plugin.onFeedbackSubmit) return undefined
+				const ctx = pluginContexts.get(plugin.name)
+				if (!ctx) return undefined
+				try {
+					return await plugin.onFeedbackSubmit(ctx, submission)
+				} catch (err) {
+					ctx.logger.error('onFeedbackSubmit threw', err)
+					return undefined
+				}
+			})
+			const patches = await Promise.all(patchPromises)
+			enrichedSubmission = mergePluginPatches(submission, patches)
+		}
+
 		try {
-			const response = await apiClient.submitFeedback(submission)
+			const response = await apiClient.submitFeedback(enrichedSubmission)
 			if (response.success) {
 				if (shareEmail && userEmail) writeStoredEmail(userEmail)
 				onSubmit?.(feedbackData)
@@ -368,11 +479,14 @@ export function initUseroFeedbackWidget(
 				const sel = selectedRating === r
 				const bg = EMOJI_BACKGROUNDS[r]
 				const cls = ['fb-ec', sel && 'fb-ec--sel'].filter(Boolean).join(' ')
+				// Set color on the button so .fb-el (color: currentColor) inherits
+				// the themed foreground. Without this it falls back to the UA
+				// default for <button>, which is black on dark backgrounds.
 				return `
 					<div class="${cls}" style="background:${bg}">
-						<button type="button" class="fb-eb" data-rating="${r}" role="radio" aria-checked="${sel}" aria-label="${r}: ${RATING_LABELS[r]}">
+						<button type="button" class="fb-eb" data-rating="${r}" role="radio" aria-checked="${sel}" aria-label="${r}: ${RATING_LABELS[r]}" style="color:${theme.text}">
 							<div class="fb-ei"><span role="img" aria-label="${RATING_LABELS[r]}">${EMOJI_MAP[r]}</span></div>
-							<div class="fb-el">${RATING_LABELS[r]}</div>
+							<div class="fb-el" style="color:${theme.text}">${RATING_LABELS[r]}</div>
 						</button>
 					</div>
 				`
@@ -383,10 +497,29 @@ export function initUseroFeedbackWidget(
 			? `<div class="fb-msg fb-msg--header ${submitMessage.type === 'success' ? 'fb-msg--ok' : 'fb-msg--err'}">${submitMessage.type === 'success' ? '✓' : '⚠'} ${escapeHtml(submitMessage.text)}</div>`
 			: ''
 
-		const screenshotBlockHtml = showScreenshotOption
+		// The upload button + char counter share a single horizontal row to
+		// keep the panel compact (matches the legacy react-feedback-collector
+		// layout). Upload extras (error message, previews, max limit) live on
+		// their own row beneath, so they can wrap freely.
+		const uploadBtnHtml = showScreenshotOption
 			? (() => {
 					const atMax = screenshots.length >= MAX_SCREENSHOTS
 					const btnDisabled = isUploadingScreenshot || atMax
+					return `
+						<input type="file" accept="image/*" data-role="screenshot-input" style="display:none;" aria-label="Choose screenshot" />
+						<button type="button" class="fb-upb ${btnDisabled ? 'fb-upb--dis' : ''}" data-role="screenshot-pick" ${btnDisabled ? 'disabled' : ''} style="border:1px solid ${theme.border};color:${theme.text};">
+							${
+								isUploadingScreenshot
+									? '<span class="fb-ups"></span> Uploading...'
+									: '📷 Add screenshot'
+							}
+						</button>
+					`
+				})()
+			: ''
+		const uploadExtrasHtml = showScreenshotOption
+			? (() => {
+					const atMax = screenshots.length >= MAX_SCREENSHOTS
 					const previewsHtml = screenshots
 						.map(
 							(shot, i) => `
@@ -403,27 +536,13 @@ export function initUseroFeedbackWidget(
 					const limitHtml = atMax
 						? `<div class="fb-sl">Max ${MAX_SCREENSHOTS}</div>`
 						: ''
-					const extrasHtml =
-						screenshotError || screenshots.length > 0 || atMax
-							? `<div class="fb-up-extras">${errorHtml}${
-									screenshots.length > 0
-										? `<div class="fb-ss">${previewsHtml}</div>`
-										: ''
-								}${limitHtml}</div>`
-							: ''
-					return `
-						<div class="fb-up">
-							<input type="file" accept="image/*" data-role="screenshot-input" style="display:none;" aria-label="Choose screenshot" />
-							<button type="button" class="fb-upb ${btnDisabled ? 'fb-upb--dis' : ''}" data-role="screenshot-pick" ${btnDisabled ? 'disabled' : ''} style="border:1px solid ${theme.border};color:${theme.text};">
-								${
-									isUploadingScreenshot
-										? '<span class="fb-ups"></span> Uploading...'
-										: '📷 Add screenshot'
-								}
-							</button>
-							${extrasHtml}
-						</div>
-					`
+					return screenshotError || screenshots.length > 0 || atMax
+						? `<div class="fb-up-extras">${errorHtml}${
+								screenshots.length > 0
+									? `<div class="fb-ss">${previewsHtml}</div>`
+									: ''
+							}${limitHtml}</div>`
+						: ''
 				})()
 			: ''
 
@@ -456,8 +575,11 @@ export function initUseroFeedbackWidget(
 				<form data-role="form">
 					<div class="fb-es" role="radiogroup" aria-label="Rate experience">${ratingsHtml}</div>
 					<textarea class="fb-ta" data-role="comment" placeholder="${escapeHtml(placeholder)}" aria-label="Comments" maxlength="1000" rows="2" style="border:1px solid ${theme.border};color:${theme.text};background-color:${theme.background};">${escapeHtml(comment)}</textarea>
-					<div class="fb-charcount${lowChars ? ' fb-charcount--low' : ''}" data-role="charcount" style="color:${lowChars ? '#dc2626' : theme.text};opacity:${lowChars ? 1 : 0.6};">${remaining} chars remaining</div>
-					${screenshotBlockHtml}
+					<div class="fb-toolrow">
+						${uploadBtnHtml}
+						<div class="fb-charcount${lowChars ? ' fb-charcount--low' : ''}" data-role="charcount" style="color:${lowChars ? '#dc2626' : theme.text};opacity:${lowChars ? 1 : 0.6};">${remaining} chars remaining</div>
+					</div>
+					${uploadExtrasHtml ? `<div class="fb-up">${uploadExtrasHtml}</div>` : ''}
 					${emailBlockHtml}
 					<button class="fb-sub ${submitDisabled ? 'fb-sub--dis' : ''}" type="submit" aria-label="Submit" ${submitDisabled ? 'disabled' : ''} style="${submitStyle}">
 						${isSubmitting ? '<span class="fb-spin"></span>' : ''}
@@ -621,10 +743,23 @@ export function initUseroFeedbackWidget(
 			destroyed = true
 			document.removeEventListener('keydown', onKeyDown)
 			detachMqlListener()
+			for (const plugin of pluginList) {
+				if (!plugin.onDestroy) continue
+				const ctx = pluginContexts.get(plugin.name)
+				if (!ctx) continue
+				try {
+					plugin.onDestroy(ctx)
+				} catch (err) {
+					ctx.logger.error('onDestroy threw', err)
+				}
+			}
+			pluginStores.clear()
+			pluginContexts.clear()
 			host.remove()
 		},
 		open,
 		close,
+		whenReady: () => readyPromise,
 		update: next => {
 			if (destroyed) return
 			let needsRender = false
