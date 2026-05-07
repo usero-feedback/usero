@@ -88,9 +88,7 @@ The widget has a tiny plugin API for opt-in features that would otherwise bloat 
 
 Attaches a rolling rrweb buffer (last 30 seconds by default) to each feedback submission, gzipped via the native CompressionStream API.
 
-```bash
-npm install rrweb
-```
+`rrweb` ships inside the plugin chunk, so `npm install @usero/sdk` is the only install step. The plugin entry is a separate subpath export, so consumers who never `import` it pay zero rrweb bytes on the base bundle.
 
 ```ts
 import { initUseroFeedbackWidget } from '@usero/sdk'
@@ -111,7 +109,7 @@ initUseroFeedbackWidget({
 })
 ```
 
-`rrweb` is an optional peer dependency — install it only if you use this plugin. Consumers who don't import the plugin pay zero rrweb bytes (verified: the base bundle has zero rrweb references). The plugin entry itself is ~1.8KB gzipped, and `rrweb` lazy-loads at runtime via dynamic import the first time the engagement gate elapses.
+The base bundle (`@usero/sdk` and `@usero/sdk/react`) has zero rrweb references. Importing the plugin pulls in a separate chunk, and `rrweb` itself lazy-loads at runtime via dynamic import the first time the engagement gate elapses, so even consumers who DO opt into the plugin don't pay rrweb's bytes upfront.
 
 #### Privacy defaults
 
@@ -153,7 +151,19 @@ export function consoleCapture(): UseroPlugin {
 }
 ```
 
-Plugins return a `Partial<FeedbackSubmission>` from `onFeedbackSubmit`. The patch is shallow-merged into the outgoing payload.
+Plugins return a `Partial<FeedbackSubmission>` from `onFeedbackSubmit`. Top-level keys are shallow-merged into the outgoing payload (later plugins win wholesale). `metadata` is deep-merged one level so multiple plugins can each contribute their own metadata keys without clobbering each other.
+
+### `widget.whenReady()`
+
+`initUseroFeedbackWidget` returns a handle with a `whenReady(): Promise<void>` method that resolves once every plugin's `onInit` has settled (fulfilled or rejected — a misbehaving plugin never blocks readiness). It's intended for end-to-end tests and dogfooding scripts that want to trigger a synthetic submit only after all plugins are live:
+
+```ts
+const widget = initUseroFeedbackWidget({ clientId, plugins: [sessionReplay()] })
+await widget.whenReady()
+widget.open()
+```
+
+If no plugins are registered, `whenReady()` resolves immediately.
 
 ## Why named exports only
 
@@ -174,7 +184,7 @@ Outputs:
 
 - `dist/vanilla.js` (ESM) + `dist/vanilla.cjs` + `dist/vanilla.d.ts`
 - `dist/react.js` (ESM) + `dist/react.cjs` + `dist/react.d.ts`
-- `dist/plugins/session-replay.js` (ESM) + `.cjs` + `.d.ts`
+- `dist/plugins/session-replay.js` (ESM) + `.cjs` + `.d.ts` plus a sibling `dist/all-*.js` chunk that holds the bundled rrweb runtime. The plugin loads this chunk via dynamic `import()` so it only downloads when the plugin actually needs it.
 - `dist/usero.iife.js` (minified, exposes `window.Usero`)
 
 ## License

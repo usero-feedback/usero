@@ -86,6 +86,12 @@ export interface UseroWidgetHandle {
 	// wrapper) typically route callbacks through this so identity changes on
 	// re-render don't force a tear-down.
 	update: (next: Partial<Omit<FeedbackWidgetProps, 'clientId' | 'baseUrl'>>) => void
+	// Resolves once every plugin's `onInit` promise has settled (fulfilled
+	// OR rejected). Intended for end-to-end tests and dogfooding scripts
+	// that want to trigger a synthetic submit only after plugins are live.
+	// Plugins with synchronous `onInit` make this resolve on the next
+	// microtask. If no plugins are registered, it resolves immediately.
+	whenReady: () => Promise<void>
 }
 
 const EMAIL_STORAGE_KEY = 'feedback_user_email'
@@ -107,6 +113,32 @@ function escapeHtml(value: string): string {
 				return ch
 		}
 	})
+}
+
+// Merge plugin onFeedbackSubmit patches into a base submission.
+//
+// Top-level keys: shallow-merge, later patches win wholesale.
+// `metadata`: deep-merge one level. Earlier keys are preserved when later
+// patches don't set them; later keys win on conflict. This means two
+// plugins can both contribute `metadata: { ... }` without either erasing
+// the other's keys.
+export function mergePluginPatches(
+	base: FeedbackSubmission,
+	patches: ReadonlyArray<Partial<FeedbackSubmission> | undefined>,
+): FeedbackSubmission {
+	let result: FeedbackSubmission = base
+	for (const patch of patches) {
+		if (!patch || typeof patch !== 'object') continue
+		const { metadata: patchMetadata, ...rest } = patch
+		result = { ...result, ...rest }
+		if (patchMetadata && typeof patchMetadata === 'object') {
+			result.metadata = {
+				...(result.metadata ?? {}),
+				...patchMetadata,
+			}
+		}
+	}
+	return result
 }
 
 function readStoredEmail(): string {
@@ -135,6 +167,7 @@ export function initUseroFeedbackWidget(
 			open: () => {},
 			close: () => {},
 			update: () => {},
+			whenReady: () => Promise.resolve(),
 		}
 	}
 
@@ -148,6 +181,7 @@ export function initUseroFeedbackWidget(
 			open: () => {},
 			close: () => {},
 			update: () => {},
+			whenReady: () => Promise.resolve(),
 		}
 	}
 
@@ -177,6 +211,10 @@ export function initUseroFeedbackWidget(
 	const pluginList: ReadonlyArray<UseroPlugin> = props.plugins ?? []
 	const pluginStores = new Map<string, unknown>()
 	const pluginContexts = new Map<string, PluginContext>()
+	// Tracks every onInit's settlement so `whenReady()` can resolve only
+	// after all plugins have finished initializing. Synchronous onInits
+	// resolve on the next microtask via Promise.resolve().
+	const initPromises: Promise<void>[] = []
 	for (const plugin of pluginList) {
 		const ctx: PluginContext = {
 			clientId,
@@ -189,18 +227,18 @@ export function initUseroFeedbackWidget(
 		}
 		pluginContexts.set(plugin.name, ctx)
 		if (plugin.onInit) {
-			try {
-				const ret = plugin.onInit(ctx)
-				if (ret && typeof (ret as Promise<unknown>).then === 'function') {
-					(ret as Promise<unknown>).catch((err: unknown) => {
-						ctx.logger.error('onInit threw', err)
-					})
+			const settled = (async () => {
+				try {
+					await plugin.onInit?.(ctx)
+				} catch (err) {
+					ctx.logger.error('onInit threw', err)
 				}
-			} catch (err) {
-				ctx.logger.error('onInit threw', err)
-			}
+			})()
+			initPromises.push(settled)
 		}
 	}
+	const readyPromise: Promise<void> =
+		initPromises.length === 0 ? Promise.resolve() : Promise.all(initPromises).then(() => {})
 
 	// State
 	let isOpen = false
@@ -344,9 +382,19 @@ export function initUseroFeedbackWidget(
 			return
 		}
 
-		// Run plugin onFeedbackSubmit hooks in parallel and shallow-merge the
+		// Run plugin onFeedbackSubmit hooks in parallel and merge the
 		// returned partial payloads into the outgoing submission. A plugin
 		// that throws or rejects is logged and skipped — never blocks submit.
+		//
+		// Merge policy:
+		//   - `metadata` is DEEP-merged (one level): later plugins' keys
+		//     win on conflict, but non-conflicting keys from earlier
+		//     plugins are preserved. metadata is the natural collision
+		//     point (every plugin wants to attach context) so deep merge
+		//     is what users expect.
+		//   - Every other top-level key is shallow-merged: later plugins
+		//     win wholesale. This is fine in practice because dedicated
+		//     keys like `replayEvents` have a single writer.
 		let enrichedSubmission: FeedbackSubmission = submission
 		if (pluginList.length > 0) {
 			const patchPromises = pluginList.map(async plugin => {
@@ -361,11 +409,7 @@ export function initUseroFeedbackWidget(
 				}
 			})
 			const patches = await Promise.all(patchPromises)
-			for (const patch of patches) {
-				if (patch && typeof patch === 'object') {
-					enrichedSubmission = { ...enrichedSubmission, ...patch }
-				}
-			}
+			enrichedSubmission = mergePluginPatches(submission, patches)
 		}
 
 		try {
@@ -715,6 +759,7 @@ export function initUseroFeedbackWidget(
 		},
 		open,
 		close,
+		whenReady: () => readyPromise,
 		update: next => {
 			if (destroyed) return
 			let needsRender = false

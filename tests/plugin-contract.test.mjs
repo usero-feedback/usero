@@ -124,3 +124,82 @@ test('a misbehaving plugin does not block widget init or destroy', () => {
 	// destroy must not throw even though onDestroy did.
 	assert.doesNotThrow(() => handle.destroy())
 })
+
+test('mergePluginPatches deep-merges metadata, shallow-merges everything else', async () => {
+	const { mergePluginPatches } = await import('../dist/vanilla.js')
+	const base = {
+		clientId: 'c',
+		comment: 'hi',
+		metadata: { app: 'usero', existing: true },
+	}
+	const patchA = { metadata: { plugin: 'A', existing: 'overwritten-by-A' } }
+	const patchB = { replayEvents: 'gz-bytes', metadata: { plugin: 'B' } }
+	const merged = mergePluginPatches(base, [patchA, patchB, undefined])
+
+	// Shallow-merged top-level key from patchB.
+	assert.equal(merged.replayEvents, 'gz-bytes')
+	assert.equal(merged.comment, 'hi', 'unrelated base keys preserved')
+
+	// Deep-merged metadata: keys from base, patchA, patchB all coexist; later
+	// plugins win on conflict.
+	assert.equal(merged.metadata.app, 'usero', 'base metadata key preserved')
+	assert.equal(merged.metadata.plugin, 'B', 'later plugin wins conflict')
+	assert.equal(
+		merged.metadata.existing,
+		'overwritten-by-A',
+		'patchA value persists when patchB does not redefine the key',
+	)
+})
+
+test('whenReady resolves immediately when there are no plugins', async () => {
+	const handle = initUseroFeedbackWidget({
+		clientId: 'test-client-3',
+		baseUrl: 'https://example.com',
+	})
+	await handle.whenReady()
+	handle.destroy()
+})
+
+test('whenReady waits for async onInit to settle, even when it rejects', async () => {
+	const order = []
+	let resolveSlow
+	const slowPromise = new Promise(resolve => {
+		resolveSlow = resolve
+	})
+	const slowPlugin = {
+		name: 'slow',
+		async onInit() {
+			order.push('init-start')
+			await slowPromise
+			order.push('init-end')
+		},
+	}
+	const flakyPlugin = {
+		name: 'flaky',
+		async onInit() {
+			throw new Error('rejected init')
+		},
+	}
+
+	const handle = initUseroFeedbackWidget({
+		clientId: 'test-client-4',
+		baseUrl: 'https://example.com',
+		plugins: [slowPlugin, flakyPlugin],
+	})
+
+	// whenReady must NOT have resolved yet — slowPlugin is still pending.
+	let readyResolved = false
+	const readyPromise = handle.whenReady().then(() => {
+		readyResolved = true
+	})
+	// Yield a microtask cycle to let any sync paths flush.
+	await Promise.resolve()
+	await Promise.resolve()
+	assert.equal(readyResolved, false, 'whenReady should still be pending')
+
+	resolveSlow()
+	await readyPromise
+	assert.equal(readyResolved, true, 'whenReady resolved after slow plugin finished')
+	assert.deepEqual(order, ['init-start', 'init-end'])
+	handle.destroy()
+})

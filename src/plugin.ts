@@ -10,9 +10,12 @@
 //   2. `onInit` runs fire-and-forget so a slow plugin never blocks the
 //      widget from rendering. Plugins that need to be ready before the
 //      first interaction are responsible for their own gating internally.
-//   3. `onFeedbackSubmit` is awaited and its return value is shallow-merged
-//      into the outgoing payload. Plugins MUST return quickly (a few hundred
-//      ms at most) or risk users abandoning the submit.
+//   3. `onFeedbackSubmit` is awaited and its return value is merged into
+//      the outgoing payload. Top-level keys are shallow-merged (later
+//      plugins win wholesale); `metadata` is deep-merged one level so two
+//      plugins can both contribute keys without clobbering each other.
+//      Plugins MUST return quickly (a few hundred ms at most) or risk users
+//      abandoning the submit.
 //   4. Plugin errors are caught and logged; they never block a submission.
 
 import type { FeedbackSubmission } from './types'
@@ -39,8 +42,11 @@ export interface UseroPlugin {
 	// Convention: lowercase kebab-case (e.g. `session-replay`).
 	name: string
 	onInit?: (ctx: PluginContext) => void | Promise<void>
-	// Returns a partial submission patch that gets shallow-merged into the
-	// outgoing payload. Return `undefined` to contribute nothing.
+	// Returns a partial submission patch that gets merged into the outgoing
+	// payload. Top-level keys are shallow-merged (later plugins win on
+	// conflict); `metadata` is deep-merged one level so multiple plugins
+	// can each attach their own metadata keys without clobbering. Return
+	// `undefined` to contribute nothing.
 	onFeedbackSubmit?: (
 		ctx: PluginContext,
 		submission: FeedbackSubmission,

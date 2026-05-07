@@ -20,6 +20,8 @@ const handle: UseroWidgetHandle = initUseroFeedbackWidget(propsA)
 handle.destroy()
 handle.open()
 handle.close()
+const ready: Promise<void> = handle.whenReady()
+void ready
 
 // Just reference the React export to ensure the module + its type re-exports resolve.
 const _component: typeof UseroFeedbackWidget = UseroFeedbackWidget
