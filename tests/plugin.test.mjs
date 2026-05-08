@@ -1,68 +1,225 @@
-// Plugin contract + session-replay buffer/gzip smoke tests.
+// Plugin contract + session-replay chunked-upload smoke tests.
 //
 // Run with: node --test tests/plugin.test.mjs
 //
-// Uses jsdom-free shimming for the bits the vanilla widget touches in its
-// init path (document, window, matchMedia). The widget's render code is
-// not exercised here — these tests focus purely on the plugin contract
-// (init/submit/destroy) and the session-replay helpers.
+// These tests exercise the SDK's session-replay plugin without jsdom.
+// They focus on the chunking helpers, the gzip path, and the chunk-upload
+// retry / idempotency contract (PR B1).
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { __test__ } from '../dist/plugins/session-replay.js'
 
-const { evictOldEvents, gzipString, uint8ToBase64 } = __test__
+const { uint8ToBase64, gzipBytes, joinUrl, uploadChunk, createSession, HARD_CHUNK_BYTE_CAP, SDK_SESSION_STORAGE_KEY } = __test__
 
-test('evictOldEvents drops events older than the window', () => {
-	const now = 10_000
-	const events = [
-		{ type: 0, data: {}, timestamp: 1_000 },
-		{ type: 0, data: {}, timestamp: 5_000 },
-		{ type: 0, data: {}, timestamp: 8_500 },
-		{ type: 0, data: {}, timestamp: 9_900 },
-	]
-	// 3-second window: cutoff = 7_000, drop the first two.
-	evictOldEvents(events, 3, now)
-	assert.equal(events.length, 2)
-	assert.equal(events[0].timestamp, 8_500)
-	assert.equal(events[1].timestamp, 9_900)
-})
-
-test('evictOldEvents is a no-op when all events are inside the window', () => {
-	const now = 10_000
-	const events = [
-		{ type: 0, data: {}, timestamp: 8_000 },
-		{ type: 0, data: {}, timestamp: 9_000 },
-	]
-	evictOldEvents(events, 5, now)
-	assert.equal(events.length, 2)
-})
+const silentLogger = {
+	debug: () => {},
+	info: () => {},
+	warn: () => {},
+	error: () => {},
+}
 
 test('uint8ToBase64 round-trips through atob', () => {
 	const bytes = new Uint8Array([72, 101, 108, 108, 111]) // "Hello"
 	const encoded = uint8ToBase64(bytes)
 	assert.equal(encoded, 'SGVsbG8=')
-	const decoded = Buffer.from(encoded, 'base64').toString('utf8')
-	assert.equal(decoded, 'Hello')
 })
 
-test('gzipString produces valid gzip bytes (magic 1f 8b)', async () => {
+test('gzipBytes produces gzip magic bytes (1f 8b)', async () => {
 	const input = JSON.stringify({ events: Array.from({ length: 50 }, (_, i) => ({ i })) })
-	const encoded = await gzipString(input)
-	const bytes = Buffer.from(encoded, 'base64')
+	const bytes = await gzipBytes(input)
 	assert.equal(bytes[0], 0x1f, 'gzip magic byte 0')
 	assert.equal(bytes[1], 0x8b, 'gzip magic byte 1')
-	// Compressed output should be smaller than the input (the input has lots
-	// of repetition so this should hold easily).
-	assert.ok(bytes.length < input.length, `compressed (${bytes.length}) should be smaller than input (${input.length})`)
+	assert.ok(bytes.byteLength < input.length, 'compressed should be smaller')
 })
 
-test('gzipString round-trips through gunzip', async () => {
+test('gzipBytes round-trips through gunzip', async () => {
 	const { gunzipSync } = await import('node:zlib')
 	const input = 'a'.repeat(1000) + 'b'.repeat(1000)
-	const encoded = await gzipString(input)
-	const bytes = Buffer.from(encoded, 'base64')
-	const restored = gunzipSync(bytes).toString('utf8')
+	const bytes = await gzipBytes(input)
+	const restored = gunzipSync(Buffer.from(bytes)).toString('utf8')
 	assert.equal(restored, input)
+})
+
+test('joinUrl strips trailing slashes', () => {
+	assert.equal(joinUrl('https://api.example.com/', '/x'), 'https://api.example.com/x')
+	assert.equal(joinUrl('https://api.example.com', '/x'), 'https://api.example.com/x')
+})
+
+test('HARD_CHUNK_BYTE_CAP matches the documented 4MB server cap', () => {
+	assert.equal(HARD_CHUNK_BYTE_CAP, 4 * 1024 * 1024)
+})
+
+test('SDK_SESSION_STORAGE_KEY is namespaced', () => {
+	assert.match(SDK_SESSION_STORAGE_KEY, /^usero:session-replay:/)
+})
+
+// uploadChunk: success on first try
+test('uploadChunk: succeeds on first attempt and sends the right headers', async () => {
+	const calls = []
+	globalThis.fetch = async (url, init) => {
+		calls.push({ url, init })
+		return new Response('{"ok":true}', { status: 200 })
+	}
+	const result = await uploadChunk(
+		'https://api.example.com',
+		'sess-1',
+		'client-x',
+		3,
+		new Uint8Array([1, 2, 3]),
+		7,
+		2500,
+		silentLogger,
+		5,
+	)
+	assert.equal(result.ok, true)
+	assert.equal(result.stopSession, false)
+	assert.equal(calls.length, 1)
+	assert.equal(calls[0].url, 'https://api.example.com/api/replay-sessions/sess-1/chunks/3')
+	assert.equal(calls[0].init.method, 'PUT')
+	assert.equal(calls[0].init.headers['Content-Type'], 'application/octet-stream')
+	assert.equal(calls[0].init.headers['X-Usero-Client-Id'], 'client-x')
+	assert.equal(calls[0].init.headers['X-Usero-Event-Count'], '7')
+	assert.equal(calls[0].init.headers['X-Usero-Duration-Ms'], '2500')
+})
+
+// uploadChunk: 409 stops the session immediately
+test('uploadChunk: 409 returns stopSession=true with no retry', async () => {
+	let calls = 0
+	globalThis.fetch = async () => {
+		calls += 1
+		return new Response('{"droppedReason":"bot"}', { status: 409 })
+	}
+	const result = await uploadChunk(
+		'https://api.example.com',
+		'sess-1',
+		'client-x',
+		0,
+		new Uint8Array([1]),
+		1,
+		0,
+		silentLogger,
+		5,
+	)
+	assert.equal(result.ok, false)
+	assert.equal(result.stopSession, true)
+	assert.equal(calls, 1, '409 should not retry')
+})
+
+// uploadChunk: 5xx retries with backoff and eventually succeeds
+test('uploadChunk: retries 5xx and succeeds on later attempt', async () => {
+	let calls = 0
+	globalThis.fetch = async () => {
+		calls += 1
+		if (calls < 3) return new Response('boom', { status: 500 })
+		return new Response('{"ok":true}', { status: 200 })
+	}
+	const result = await uploadChunk(
+		'https://api.example.com',
+		'sess-1',
+		'client-x',
+		0,
+		new Uint8Array([1]),
+		1,
+		0,
+		silentLogger,
+		5,
+	)
+	assert.equal(result.ok, true)
+	assert.equal(calls, 3, 'should retry until success')
+})
+
+// uploadChunk: idempotent retry of same seq is fine on the SDK side — it
+// just resends. The server's R2 head-check is what makes that idempotent.
+// We verify here that we DO resend (no client-side de-dup) so a transient
+// success-with-no-response still gets retried.
+test('uploadChunk: resends the same seq across retries (server makes idempotent)', async () => {
+	const seqs = []
+	let calls = 0
+	globalThis.fetch = async (url) => {
+		calls += 1
+		const m = /chunks\/(\d+)/.exec(url)
+		if (m) seqs.push(Number(m[1]))
+		if (calls === 1) throw new TypeError('network blip')
+		return new Response('{"ok":true}', { status: 200 })
+	}
+	const result = await uploadChunk(
+		'https://api.example.com',
+		'sess-1',
+		'client-x',
+		7,
+		new Uint8Array([1]),
+		1,
+		0,
+		silentLogger,
+		5,
+	)
+	assert.equal(result.ok, true)
+	assert.deepEqual(seqs, [7, 7])
+})
+
+// uploadChunk: 4xx (other than 408/429) gives up without retry
+test('uploadChunk: 400 gives up immediately', async () => {
+	let calls = 0
+	globalThis.fetch = async () => {
+		calls += 1
+		return new Response('bad', { status: 400 })
+	}
+	const result = await uploadChunk(
+		'https://api.example.com',
+		'sess-1',
+		'client-x',
+		0,
+		new Uint8Array([1]),
+		1,
+		0,
+		silentLogger,
+		5,
+	)
+	assert.equal(result.ok, false)
+	assert.equal(result.stopSession, false)
+	assert.equal(calls, 1)
+})
+
+// createSession: returns parsed result on 200
+test('createSession: parses {accepted,sessionReplayId}', async () => {
+	let body = null
+	globalThis.fetch = async (_url, init) => {
+		body = init && init.body ? JSON.parse(init.body) : null
+		return new Response(
+			JSON.stringify({ accepted: true, sessionReplayId: 'r-123' }),
+			{ status: 200, headers: { 'Content-Type': 'application/json' } },
+		)
+	}
+	// Stub minimal browser globals so createSession can read href + UA.
+	globalThis.window = { location: { href: 'https://host.example/page' } }
+	globalThis.navigator = { userAgent: 'jest-ua' }
+	const result = await createSession('https://api.example.com', 'cl', 'sdk-1')
+	assert.deepEqual(result, { accepted: true, sessionReplayId: 'r-123' })
+	assert.equal(body.clientId, 'cl')
+	assert.equal(body.sdkSessionId, 'sdk-1')
+	assert.equal(body.startUrl, 'https://host.example/page')
+	assert.equal(body.userAgent, 'jest-ua')
+	assert.match(body.startedAt, /^\d{4}-\d{2}-\d{2}T/)
+})
+
+// createSession: bot-dropped response is honoured
+test('createSession: returns accepted=false when bot-gated', async () => {
+	globalThis.fetch = async () =>
+		new Response(
+			JSON.stringify({ accepted: false, dropReason: 'bot' }),
+			{ status: 200, headers: { 'Content-Type': 'application/json' } },
+		)
+	const result = await createSession('https://api.example.com', 'cl', 'sdk-1')
+	assert.deepEqual(result, { accepted: false, dropReason: 'bot' })
+})
+
+// createSession: network failure returns null
+test('createSession: returns null on network failure', async () => {
+	globalThis.fetch = async () => {
+		throw new TypeError('offline')
+	}
+	const result = await createSession('https://api.example.com', 'cl', 'sdk-1')
+	assert.equal(result, null)
 })
