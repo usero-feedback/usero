@@ -34,6 +34,11 @@
       "import": "./dist/plugins/session-replay.js",
       "require": "./dist/plugins/session-replay.cjs"
     },
+    "./plugins/user-test": {
+      "types": "./dist/plugins/user-test.d.ts",
+      "import": "./dist/plugins/user-test.js",
+      "require": "./dist/plugins/user-test.cjs"
+    },
     "./package.json": "./package.json"
   },
   "files": [
