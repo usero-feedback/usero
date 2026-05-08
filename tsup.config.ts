@@ -76,7 +76,25 @@ export default defineConfig([
 			js: format === 'cjs' ? '.cjs' : '.js',
 		}),
 	},
-	// 4. IIFE for <script> tag (vanilla only, no react)
+	// 4. User-test audio capture plugin -> ESM + CJS + types. Native
+	// MediaRecorder + small shadow-DOM UI; no heavy deps. Activates only
+	// when the host URL has `?usero_test=<slug>`. Subpath export keeps the
+	// base bundle untouched for consumers who don't use it.
+	{
+		entry: { 'plugins/user-test': 'src/plugins/user-test.ts' },
+		format: ['esm', 'cjs'],
+		dts: true,
+		sourcemap: true,
+		clean: false,
+		treeshake: true,
+		platform: 'browser',
+		target: 'es2020',
+		external: ['react', 'react-dom'],
+		outExtension: ({ format }) => ({
+			js: format === 'cjs' ? '.cjs' : '.js',
+		}),
+	},
+	// 5. IIFE for <script> tag (vanilla only, no react)
 	{
 		entry: { 'usero.iife': 'src/vanilla.ts' },
 		format: ['iife'],
