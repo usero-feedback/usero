@@ -78,13 +78,20 @@ interface RrwebRecordOptions {
 	sampling?: ReplaySampling
 }
 
-type RrwebRecord = (opts: RrwebRecordOptions) => () => void
+interface RrwebRecordFn {
+	(opts: RrwebRecordOptions): () => void
+	takeFullSnapshot?: (isCheckout?: boolean) => void
+}
+
+type RrwebRecord = RrwebRecordFn
 
 interface ReplayStore {
 	events: RrwebEvent[]
+	record: RrwebRecord | null
 	stopRecording: (() => void) | null
 	startTimer: ReturnType<typeof setTimeout> | null
 	pageHideHandler: (() => void) | null
+	shadowUpdateHandler: ((event: Event) => void) | null
 	loadInProgress: boolean
 	cancelled: boolean
 	options: Required<Omit<SessionReplayOptions, 'sampling'>> & { sampling: ReplaySampling }
@@ -182,10 +189,34 @@ function startRecording(store: ReplayStore, ctx: PluginContext): void {
 				sampling: store.options.sampling,
 			})
 			store.stopRecording = stop
+			store.record = record
+			// If the widget already dispatched its `usero:shadow-update`
+			// signal before rrweb finished loading, our listener will have
+			// missed it. Re-snapshot now so any shadow root currently in
+			// the DOM (the widget's host) gets walked + registered with
+			// rrweb's shadowDomManager.
+			scheduleShadowSnapshot(store, ctx)
 		} catch (err) {
 			ctx.logger.error('rrweb record() threw', err)
 		}
 	})
+}
+
+// Throttle shadow-update full snapshots. takeFullSnapshot is cheap enough
+// for our small DOMs but we don't want to fire it on every panel-render
+// tick if the widget ever starts dispatching more aggressively.
+function scheduleShadowSnapshot(store: ReplayStore, ctx: PluginContext): void {
+	if (store.cancelled || !store.record || !store.stopRecording) return
+	const fn = store.record.takeFullSnapshot
+	if (typeof fn !== 'function') return
+	try {
+		// `isCheckout: true` writes a fresh full snapshot the player can
+		// rewind to, so the widget shadow tree is materialised even if
+		// the buffer has already evicted older events.
+		fn(true)
+	} catch (err) {
+		ctx.logger.warn('takeFullSnapshot threw', err)
+	}
 }
 
 export function sessionReplay(options: SessionReplayOptions = {}): UseroPlugin {
@@ -207,14 +238,28 @@ export function sessionReplay(options: SessionReplayOptions = {}): UseroPlugin {
 
 			const store: ReplayStore = {
 				events: [],
+				record: null,
 				stopRecording: null,
 				startTimer: null,
 				pageHideHandler: null,
+				shadowUpdateHandler: null,
 				loadInProgress: false,
 				cancelled: false,
 				options: merged,
 			}
 			ctx.setStore(store)
+
+			// Listen for the widget's shadow-update signal. The widget
+			// dispatches this when it mounts its shadow root and again
+			// when the panel opens. Each signal triggers a full snapshot
+			// so rrweb walks into the (possibly newly-rendered) shadow
+			// tree and registers it with shadowDomManager. Without this,
+			// the panel content never appears in the recording.
+			const onShadowUpdate = (): void => {
+				scheduleShadowSnapshot(store, ctx)
+			}
+			store.shadowUpdateHandler = onShadowUpdate
+			window.addEventListener('usero:shadow-update', onShadowUpdate)
 
 			const begin = (): void => {
 				if (store.startTimer) {
@@ -276,6 +321,10 @@ export function sessionReplay(options: SessionReplayOptions = {}): UseroPlugin {
 			if (store.pageHideHandler) {
 				window.removeEventListener('pagehide', store.pageHideHandler)
 				window.removeEventListener('beforeunload', store.pageHideHandler)
+			}
+			if (store.shadowUpdateHandler) {
+				window.removeEventListener('usero:shadow-update', store.shadowUpdateHandler)
+				store.shadowUpdateHandler = null
 			}
 			if (store.stopRecording) {
 				try {

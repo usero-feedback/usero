@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.3
+
+- Session replay: capture interactions inside the widget's shadow root. The vanilla widget now dispatches a `usero:shadow-update` `CustomEvent` on `window` when its shadow root is mounted and again whenever the panel opens. The session-replay plugin listens for this signal and calls `record.takeFullSnapshot(true)`, which causes rrweb to walk into the shadow tree and register it with `shadowDomManager`. Without this, the widget host was captured but the shadow-tree mutations (rating click, comment input, submit) were silently dropped from recordings.
+
 ## 0.3.1
 
 - Bump `rrweb` from `2.0.0-alpha.4` to `2.0.0-alpha.20` (~3 years of fixes). Resolves `TypeError: e.matches is not a function` thrown from `genAdds` / `processMutations` on customer sites — non-Element nodes were hitting `isBlocked`'s `.matches()` call inside the MutationObserver callback, which was uncatchable from our `try/catch` around `record()`. The path is hardened in newer alphas.
