@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- Bump `rrweb` from `2.0.0-alpha.4` to `2.0.0-alpha.20` (~3 years of fixes). Resolves `TypeError: e.matches is not a function` thrown from `genAdds` / `processMutations` on customer sites — non-Element nodes were hitting `isBlocked`'s `.matches()` call inside the MutationObserver callback, which was uncatchable from our `try/catch` around `record()`. The path is hardened in newer alphas.
+
 ## 0.2.1
 
 - Fix: chars-remaining counter no longer hijacks the first rating tile. The counter previously targeted an ambiguous selector (`.fb-cnt form > div > div`) that resolved to the first rating card after the first textarea input, overwriting the "Needs work" emoji with the chars-remaining text. Now uses a stable `[data-role="charcount"]` hook.

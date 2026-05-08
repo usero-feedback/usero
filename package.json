@@ -1,6 +1,6 @@
 {
   "name": "@usero/sdk",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Usero SDK. Drop-in feedback widget (vanilla JS, React, or script tag) plus future plugins like session replay. Zero config, framework-free, tiny.",
   "license": "MIT",
   "author": "Will Smith <will@willsmithte.com>",
@@ -72,7 +72,7 @@
     }
   },
   "dependencies": {
-    "rrweb": "^2.0.0-alpha.4"
+    "rrweb": "2.0.0-alpha.20"
   },
   "devDependencies": {
     "@types/react": "^18.2.0",
