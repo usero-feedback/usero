@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.4
+
+- Session replay: rewrite plugin to chunked-upload contract. The plugin no longer buffers events and attaches them to the feedback submit; instead it mints an `sdkSessionId` per tab, opens a `SessionReplay` row server-side via `POST /api/replay-sessions` (with bot-gate decision), streams gzipped chunks via `PUT /api/replay-sessions/:id/chunks/:seq`, and finalises on tab unload via `sendBeacon`. Exposes `getCurrentSession()` so the user-test plugin and feedback submit path can attach `sessionReplayId` + `replayOffsetMs` pointers. Sessions that never submit feedback are now captured.
+
 ## 0.3.3
 
 - Session replay: capture interactions inside the widget's shadow root. The vanilla widget now dispatches a `usero:shadow-update` `CustomEvent` on `window` when its shadow root is mounted and again whenever the panel opens. The session-replay plugin listens for this signal and calls `record.takeFullSnapshot(true)`, which causes rrweb to walk into the shadow tree and register it with `shadowDomManager`. Without this, the widget host was captured but the shadow-tree mutations (rating click, comment input, submit) were silently dropped from recordings.
