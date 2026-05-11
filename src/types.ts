@@ -30,10 +30,19 @@ export interface FeedbackSubmission {
 	environment?: string
 	screenshots?: ScreenshotData[]
 	metadata?: Record<string, unknown>
-	// Gzipped + base64-encoded rrweb event stream attached by the
-	// session-replay plugin. Optional, only present when that plugin is
-	// installed and has buffered events at submission time.
+	// Legacy gzipped + base64-encoded rrweb event stream. The pre-chunked
+	// session-replay plugin attached this on submit. The chunked-upload
+	// plugin (>= 0.4.0) does NOT set this — it ships events out-of-band
+	// via the chunk endpoints and points at the resulting session replay
+	// via `sessionReplayId` + `replayOffsetMs`. Kept on the wire one
+	// release for backward compat with old SaaS deployments that only
+	// know how to ingest the legacy field.
 	replayEvents?: string
+	// Pointer to a SessionReplay row created by the session-replay
+	// plugin's chunked-upload pipeline, plus the offset within that
+	// recording at submit time so the dashboard can deep-link.
+	sessionReplayId?: string
+	replayOffsetMs?: number
 }
 
 export interface FeedbackData {

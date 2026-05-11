@@ -264,6 +264,30 @@ export function initUseroFeedbackWidget(
 	document.body.appendChild(host)
 	const root = host.attachShadow({ mode: 'open' })
 
+	// Notify recording plugins (e.g. session-replay) that a shadow root they
+	// need to observe has just been mounted into the page. rrweb's automatic
+	// shadow-root traversal only catches roots that exist at record-start
+	// time (via the initial full snapshot) OR that get attached as part of
+	// a new node addition observed by its MutationObserver. Our widget host
+	// is appended to <body> first and `attachShadow` is called immediately
+	// after, so the observed mutation does not yet have a shadowRoot. The
+	// session-replay plugin handles this signal by re-taking a full
+	// snapshot, which causes rrweb to walk into and start observing this
+	// shadow tree. Dispatched as a CustomEvent on window so the plugin
+	// stays decoupled from the widget.
+	function notifyShadowUpdate(reason: 'mount' | 'panel-open'): void {
+		try {
+			window.dispatchEvent(
+				new CustomEvent('usero:shadow-update', {
+					detail: { host, root, reason },
+				}),
+			)
+		} catch {
+			// Older browsers without CustomEvent / dispatchEvent: best-effort.
+		}
+	}
+	notifyShadowUpdate('mount')
+
 	// Inject styles once into the shadow root.
 	const style = document.createElement('style')
 	style.textContent = FEEDBACK_CSS
@@ -298,6 +322,13 @@ export function initUseroFeedbackWidget(
 		apiClient.ping()
 		onOpen?.()
 		render()
+		// The panel's interactive content is `innerHTML`-ed inside the shadow
+		// root on first render, which IS observable by rrweb's MutationObserver
+		// as long as the shadow root is registered. Re-fire the signal so a
+		// recorder that started before the widget mounted (or before the panel
+		// rendered its first interactive markup) re-snapshots and observes the
+		// shadow root from this point on.
+		notifyShadowUpdate('panel-open')
 	}
 
 	async function handleScreenshotFile(file: File): Promise<void> {

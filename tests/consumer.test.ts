@@ -31,8 +31,8 @@ void propsB
 // Plugin contract resolves through the public export and the session-replay
 // subpath returns a UseroPlugin instance.
 const replay: UseroPlugin = sessionReplay({
-	bufferSeconds: 30,
 	startAfterMs: 3000,
 	sampleRate: 1,
+	chunkSeconds: 10,
 })
 void replay
