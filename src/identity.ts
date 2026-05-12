@@ -72,9 +72,12 @@ function safeWriteLocalStorage(key: string, value: string): void {
 export function getOrMintAnonymousId(): string {
 	if (cachedAnonymousId) return cachedAnonymousId
 	const existing = safeReadLocalStorage(ANON_STORAGE_KEY)
-	// Reject existing values that don't match the expected shape. Older SDK
-	// versions may have written a different id format; minting a fresh one
-	// is cheap and avoids edge-case collisions with whatever was there.
+	// Sanity filter, not strict validation. We accept anything that looks
+	// plausibly like an id (>=8 alphanumeric-or-hyphen) so older SDK
+	// versions that wrote a slightly different shape still stitch. Fresh
+	// mint is cheap, so we only reject obvious garbage; tightening this
+	// would force rotation in customer browsers and split otherwise-good
+	// sibling-session attribution.
 	if (existing && /^[a-z0-9-]{8,}$/i.test(existing)) {
 		cachedAnonymousId = existing
 		return existing
@@ -133,6 +136,10 @@ export async function identifyIfChanged(transport: IdentifyTransport, user: User
 	if (fp === lastIdentifyFingerprint) return false
 
 	const url = `${transport.apiUrl.replace(/\/$/, '')}/api/identify`
+	// Body must stay under the browser's keepalive / sendBeacon cap
+	// (~64KB across most engines) when this fires on pagehide. That
+	// transitively caps trait payload size; in practice traits should be
+	// small typed scalars, not blobs.
 	const body = JSON.stringify({
 		clientId: transport.clientId,
 		anonymousId,
@@ -154,12 +161,17 @@ export async function identifyIfChanged(transport: IdentifyTransport, user: User
 	) {
 		try {
 			const blob = new Blob([body], { type: 'application/json' })
+			// sendBeacon returns false when the user agent refuses to queue
+			// the request (size cap, or historically Safari rejecting
+			// non-CORS-simple content types). Modern Safari accepts
+			// application/json, but we keep a keepalive-fetch fallback so an
+			// older WebKit that rejects the beacon still ships the identify.
 			if (navigator.sendBeacon(url, blob)) {
 				lastIdentifyFingerprint = fp
 				return true
 			}
 		} catch {
-			// fall through to fetch
+			// fall through to keepalive fetch below
 		}
 	}
 

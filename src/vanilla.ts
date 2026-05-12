@@ -221,10 +221,11 @@ export function initUseroFeedbackWidget(
 	// Track the last id the SDK has seen so we can detect logout
 	// (id -> null) and rotate the anonymousId. Identify dedupe inside
 	// identifyIfChanged via a fingerprint guarantees re-runs with the same
-	// user never POST; we also short-circuit BEFORE calling it (and before
-	// the JSON.stringify the fingerprint does) when neither the id nor the
-	// trait object reference has changed. Saves a stringify on every
-	// React render that just re-passes the same user prop.
+	// user never POST. We also short-circuit BEFORE calling it when the
+	// trait object is reference-identical, which only catches hosts that
+	// memoise their traits object; the common React case of a fresh
+	// `{ ... }` literal per render falls through to the fingerprint
+	// dedupe, which is cheap (one stringify, no network) so this is fine.
 	let lastUserId: string | null = null
 	let lastTraitsRef: UseroUser['traits'] | undefined
 	let lastEmail: string | undefined
