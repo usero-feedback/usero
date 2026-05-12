@@ -210,27 +210,49 @@ export function initUseroFeedbackWidget(
 	let onOpen: FeedbackWidgetProps['onOpen'] = props.onOpen
 	let onClose: FeedbackWidgetProps['onClose'] = props.onClose
 	let getUserFn: FeedbackWidgetProps['getUser'] = props.getUser
+	// Last `user` prop seen via init or update(). When set (including
+	// explicit null for logout), it wins over getUserFn on re-resolve.
+	// `undefined` means "no `user` prop ever supplied; defer to getUser".
+	let currentUserProp: UseroUser | null | undefined = props.user
 
 	const apiClient = new FeedbackApiClient(baseUrl)
 	const identifyTransport = { apiUrl: baseUrl ?? DEFAULT_API_URL, clientId }
 
 	// Track the last id the SDK has seen so we can detect logout
-	// (id -> null) and rotate the anonymousId. Identify dedupe is handled
-	// inside identifyIfChanged via a fingerprint, so re-runs with the
-	// same user never POST.
+	// (id -> null) and rotate the anonymousId. Identify dedupe inside
+	// identifyIfChanged via a fingerprint guarantees re-runs with the same
+	// user never POST; we also short-circuit BEFORE calling it (and before
+	// the JSON.stringify the fingerprint does) when neither the id nor the
+	// trait object reference has changed. Saves a stringify on every
+	// React render that just re-passes the same user prop.
 	let lastUserId: string | null = null
+	let lastTraitsRef: UseroUser['traits'] | undefined
+	let lastEmail: string | undefined
+	let lastDisplayName: string | undefined
 
 	function applyResolvedUser(user: UseroUser | null | undefined): void {
 		const next = user ?? null
 		if (next) {
+			const unchanged =
+				next.id === lastUserId &&
+				next.traits === lastTraitsRef &&
+				next.email === lastEmail &&
+				next.displayName === lastDisplayName
+			if (unchanged) return
 			void identifyIfChanged(identifyTransport, next)
 			lastUserId = next.id
+			lastTraitsRef = next.traits
+			lastEmail = next.email
+			lastDisplayName = next.displayName
 		} else if (lastUserId !== null) {
 			// Logout transition. Rotate anonymousId so the next anonymous
 			// trail doesn't get auto-merged into the previous person on
 			// the next identify().
 			identityHandleLogout()
 			lastUserId = null
+			lastTraitsRef = undefined
+			lastEmail = undefined
+			lastDisplayName = undefined
 		}
 	}
 
@@ -273,6 +295,18 @@ export function initUseroFeedbackWidget(
 			getStore: <T,>() => pluginStores.get(plugin.name) as T | undefined,
 			setStore: <T,>(value: T) => {
 				pluginStores.set(plugin.name, value)
+			},
+			// Expose the same user-resolution path the widget uses, so plugins
+			// (e.g. session-replay for replay-only installs that never open the
+			// widget) can re-poll user state at their own boundaries. Prefers
+			// the imperative `user` prop when set, falls back to `getUser`.
+			resolveUser: () => {
+				if (destroyed) return
+				if (currentUserProp !== undefined) {
+					applyResolvedUser(currentUserProp)
+				} else {
+					resolveAndApplyGetUser()
+				}
 			},
 		}
 		pluginContexts.set(plugin.name, ctx)
@@ -853,6 +887,7 @@ export function initUseroFeedbackWidget(
 		whenReady: () => readyPromise,
 		identify: (user: UseroUser | null) => {
 			if (destroyed) return
+			currentUserProp = user
 			applyResolvedUser(user)
 		},
 		update: next => {
@@ -904,8 +939,13 @@ export function initUseroFeedbackWidget(
 			if ('getUser' in next) getUserFn = next.getUser
 			// Identity: React wrapper hot-swaps `user` here on every render.
 			// applyResolvedUser dedupes via fingerprint, so passing the same
-			// user object is a no-op transport-wise.
-			if ('user' in next) applyResolvedUser(next.user)
+			// user object is a no-op transport-wise. Track the latest prop
+			// so plugin-driven re-resolves (PluginContext.resolveUser) know
+			// to prefer the imperative path over getUserFn.
+			if ('user' in next) {
+				currentUserProp = next.user
+				applyResolvedUser(next.user)
+			}
 			if (needsRender) render()
 		},
 	}

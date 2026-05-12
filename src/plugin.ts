@@ -35,6 +35,15 @@ export interface PluginContext {
 	getStore: <T>() => T | undefined
 	setStore: <T>(value: T) => void
 	logger: PluginLogger
+	// Re-resolve the current user via the host's `user` prop or `getUser`
+	// callback and run it through the identify dedupe pipeline. Plugins
+	// that run independently of widget interaction (e.g. session-replay
+	// for replay-only customers who never open the widget) should call
+	// this at their own boundaries (session start, chunk flush, etc.)
+	// so mid-session login is visible server-side. The fingerprint
+	// dedupe in identity.ts makes repeated calls effectively free when
+	// nothing changed.
+	resolveUser?: () => void
 }
 
 export interface UseroPlugin {

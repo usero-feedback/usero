@@ -341,6 +341,14 @@ async function loadRrwebRecord(): Promise<RrwebRecord | null> {
 function scheduleChunkUpload(store: ReplayStore, ctx: PluginContext): void {
 	if (!store.sessionReplayId) return
 	if (store.pendingEvents.length === 0) return
+	// Chunk boundary: re-resolve the user. Captures mid-session login on
+	// replay-only installs that never open the widget. No-op via fingerprint
+	// dedupe if nothing changed.
+	try {
+		ctx.resolveUser?.()
+	} catch (err) {
+		ctx.logger.warn('resolveUser threw at chunk boundary', err)
+	}
 	const events = store.pendingEvents
 	const eventCount = events.length
 	const firstTs = store.pendingFirstTs ?? 0
@@ -559,6 +567,18 @@ export function sessionReplay(options: SessionReplayOptions = {}): UseroPlugin {
 
 			const begin = async (): Promise<void> => {
 				if (store.cancelled) return
+				// Replay-only customers may never open the widget, so the host's
+				// user state never gets polled by the widget's interaction
+				// boundaries. Re-resolve here so a mid-session login that
+				// happened before session start is visible server-side before
+				// the first chunk lands. Fingerprint dedupe inside
+				// identifyIfChanged makes this effectively free when nothing
+				// changed.
+				try {
+					ctx.resolveUser?.()
+				} catch (err) {
+					ctx.logger.warn('resolveUser threw at session start', err)
+				}
 				const created = await createSession(apiUrl, ctx.clientId, sdkSessionId, anonymousId)
 				if (!created) {
 					ctx.logger.warn('session create failed, replay disabled')

@@ -64,15 +64,6 @@ function safeWriteLocalStorage(key: string, value: string): void {
 	}
 }
 
-function safeRemoveLocalStorage(key: string): void {
-	if (typeof window === 'undefined') return
-	try {
-		window.localStorage?.removeItem(key)
-	} catch {
-		// ignore
-	}
-}
-
 /**
  * Returns the stable per-browser anonymousId. Reads localStorage at most
  * once per SDK instance. Subsequent calls hit the in-memory cache, so
@@ -81,6 +72,9 @@ function safeRemoveLocalStorage(key: string): void {
 export function getOrMintAnonymousId(): string {
 	if (cachedAnonymousId) return cachedAnonymousId
 	const existing = safeReadLocalStorage(ANON_STORAGE_KEY)
+	// Reject existing values that don't match the expected shape. Older SDK
+	// versions may have written a different id format; minting a fresh one
+	// is cheap and avoids edge-case collisions with whatever was there.
 	if (existing && /^[a-z0-9-]{8,}$/i.test(existing)) {
 		cachedAnonymousId = existing
 		return existing
@@ -99,7 +93,6 @@ export function getOrMintAnonymousId(): string {
 export function rotateAnonymousId(): string {
 	const id = generateRandomId()
 	cachedAnonymousId = id
-	safeRemoveLocalStorage(ANON_STORAGE_KEY)
 	safeWriteLocalStorage(ANON_STORAGE_KEY, id)
 	lastIdentifyFingerprint = null
 	return id
@@ -125,31 +118,71 @@ export interface IdentifyTransport {
  * from the last call. Returns true if a network request actually fired.
  * Never throws; failures are best-effort and the caller (the widget /
  * provider) should not treat them as errors.
+ *
+ * Tab-unload safety: if the page is hidden when this fires (visibility
+ * 'hidden' or a pagehide handler), we route the payload through
+ * `navigator.sendBeacon` so the request survives unload. Otherwise we
+ * use a normal fetch and only cache the fingerprint when the server
+ * confirms `accepted: true`. A 200 `{ accepted: false }` (e.g.
+ * `unknown_client` for a clientId that becomes valid mid-session) is
+ * treated as retryable so the next call re-fires.
  */
-export async function identifyIfChanged(
-	transport: IdentifyTransport,
-	user: UseroUser,
-): Promise<boolean> {
+export async function identifyIfChanged(transport: IdentifyTransport, user: UseroUser): Promise<boolean> {
 	const anonymousId = getOrMintAnonymousId()
 	const fp = fingerprintUser(anonymousId, user)
 	if (fp === lastIdentifyFingerprint) return false
 
+	const url = `${transport.apiUrl.replace(/\/$/, '')}/api/identify`
+	const body = JSON.stringify({
+		clientId: transport.clientId,
+		anonymousId,
+		externalUserId: user.id,
+		email: user.email,
+		displayName: user.displayName,
+		traits: user.traits,
+	})
+
+	// If the document is hidden (pagehide / tab close in flight), best-effort
+	// hand off to sendBeacon. We don't get a response back, so we optimistically
+	// cache the fingerprint to avoid re-firing on the next page; the server is
+	// idempotent if the page reload re-runs identify with the same payload.
+	if (
+		typeof document !== 'undefined' &&
+		document.visibilityState === 'hidden' &&
+		typeof navigator !== 'undefined' &&
+		typeof navigator.sendBeacon === 'function'
+	) {
+		try {
+			const blob = new Blob([body], { type: 'application/json' })
+			if (navigator.sendBeacon(url, blob)) {
+				lastIdentifyFingerprint = fp
+				return true
+			}
+		} catch {
+			// fall through to fetch
+		}
+	}
+
 	try {
-		const res = await fetch(`${transport.apiUrl.replace(/\/$/, '')}/api/identify`, {
+		const res = await fetch(url, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({
-				clientId: transport.clientId,
-				anonymousId,
-				externalUserId: user.id,
-				email: user.email,
-				displayName: user.displayName,
-				traits: user.traits,
-			}),
+			body,
+			// keepalive lets the request survive a tab-close mid-flight on
+			// browsers that support it; sendBeacon above is the primary path.
+			keepalive: true,
 		})
-		// Cache fingerprint on 2xx so we don't hammer the endpoint. On error
-		// we leave the fingerprint untouched so the next call will retry.
-		if (res.ok) lastIdentifyFingerprint = fp
+		if (!res.ok) return true
+		// Parse the response: a 200 with `accepted: false` (e.g. unknown
+		// client) is retryable. Only cache the fingerprint when the server
+		// confirmed it actually stored the identity.
+		try {
+			const json = (await res.json()) as { accepted?: unknown }
+			if (json && json.accepted === true) lastIdentifyFingerprint = fp
+		} catch {
+			// Server returned 2xx but unparseable body: don't cache, let the
+			// next call retry.
+		}
 		return true
 	} catch {
 		return false
