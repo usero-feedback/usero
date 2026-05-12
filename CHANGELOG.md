@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.0
+
+- User identity: declarative-first identification with `sendBeacon` durability. The session-replay plugin now persists an `anonymousId` in `localStorage` and includes it when opening a `SessionReplay` row, so anonymous sessions stay stitched across reloads and tabs. `UseroFeedbackWidget` (React) accepts a `user` prop and the vanilla `init()` accepts a `getUser` callback, both of which flow through to replay session creation and are re-sent on identity change. Finalisation on `pagehide` now uses `navigator.sendBeacon` so the last chunk and identity update survive tab close. The imperative `handle.identify()` API is preserved as an escape hatch for non-declarative flows.
+
 ## 0.3.4
 
 - Session replay: rewrite plugin to chunked-upload contract. The plugin no longer buffers events and attaches them to the feedback submit; instead it mints an `sdkSessionId` per tab, opens a `SessionReplay` row server-side via `POST /api/replay-sessions` (with bot-gate decision), streams gzipped chunks via `PUT /api/replay-sessions/:id/chunks/:seq`, and finalises on tab unload via `sendBeacon`. Exposes `getCurrentSession()` so the user-test plugin and feedback submit path can attach `sessionReplayId` + `replayOffsetMs` pointers. Sessions that never submit feedback are now captured.
