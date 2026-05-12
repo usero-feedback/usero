@@ -11,12 +11,13 @@
 
 import { FeedbackApiClient } from './api'
 import { getGradientEnd } from './colorUtils'
+import { handleLogout as identityHandleLogout, identifyIfChanged } from './identity'
 import {
 	createPluginLogger,
 	type PluginContext,
 	type UseroPlugin,
 } from './plugin'
-import { DEFAULT_API_URL } from './types'
+import { DEFAULT_API_URL, type UseroUser } from './types'
 import {
 	DARK_THEME,
 	DEFAULT_THEME,
@@ -86,6 +87,11 @@ export interface UseroWidgetHandle {
 	// wrapper) typically route callbacks through this so identity changes on
 	// re-render don't force a tear-down.
 	update: (next: Partial<Omit<FeedbackWidgetProps, 'clientId' | 'baseUrl'>>) => void
+	// Imperative identify(). Documented as a fallback for setups that
+	// cannot expose user state via the declarative `user` prop or
+	// `getUser` getter. Internally just routes through the same dedupe
+	// pipeline as the declarative path.
+	identify: (user: UseroUser | null) => void
 	// Resolves once every plugin's `onInit` promise has settled (fulfilled
 	// OR rejected). Intended for end-to-end tests and dogfooding scripts
 	// that want to trigger a synthetic submit only after plugins are live.
@@ -168,6 +174,7 @@ export function initUseroFeedbackWidget(
 			close: () => {},
 			update: () => {},
 			whenReady: () => Promise.resolve(),
+			identify: () => {},
 		}
 	}
 
@@ -182,6 +189,7 @@ export function initUseroFeedbackWidget(
 			close: () => {},
 			update: () => {},
 			whenReady: () => Promise.resolve(),
+			identify: () => {},
 		}
 	}
 
@@ -201,8 +209,50 @@ export function initUseroFeedbackWidget(
 	let onError: FeedbackWidgetProps['onError'] = props.onError
 	let onOpen: FeedbackWidgetProps['onOpen'] = props.onOpen
 	let onClose: FeedbackWidgetProps['onClose'] = props.onClose
+	let getUserFn: FeedbackWidgetProps['getUser'] = props.getUser
 
 	const apiClient = new FeedbackApiClient(baseUrl)
+	const identifyTransport = { apiUrl: baseUrl ?? DEFAULT_API_URL, clientId }
+
+	// Track the last id the SDK has seen so we can detect logout
+	// (id -> null) and rotate the anonymousId. Identify dedupe is handled
+	// inside identifyIfChanged via a fingerprint, so re-runs with the
+	// same user never POST.
+	let lastUserId: string | null = null
+
+	function applyResolvedUser(user: UseroUser | null | undefined): void {
+		const next = user ?? null
+		if (next) {
+			void identifyIfChanged(identifyTransport, next)
+			lastUserId = next.id
+		} else if (lastUserId !== null) {
+			// Logout transition. Rotate anonymousId so the next anonymous
+			// trail doesn't get auto-merged into the previous person on
+			// the next identify().
+			identityHandleLogout()
+			lastUserId = null
+		}
+	}
+
+	function resolveAndApplyGetUser(): void {
+		if (!getUserFn) return
+		try {
+			applyResolvedUser(getUserFn() ?? null)
+		} catch {
+			// getUser threw; leave the resolved user as it was. Do not
+			// rotate, do not fire identify. A throwing getter likely means
+			// the host app's auth context is mid-render.
+		}
+	}
+
+	// Initial resolve: prefer the imperative `user` prop, fall back to
+	// the `getUser` callback. Both are safe to call here; we just don't
+	// fire identify when both are absent.
+	if (props.user !== undefined) {
+		applyResolvedUser(props.user)
+	} else if (getUserFn) {
+		resolveAndApplyGetUser()
+	}
 
 	// Plugin registry. Each plugin gets its own context with a private store.
 	// `onInit` is fired non-blocking so a slow plugin can't delay the first
@@ -275,6 +325,15 @@ export function initUseroFeedbackWidget(
 	// snapshot, which causes rrweb to walk into and start observing this
 	// shadow tree. Dispatched as a CustomEvent on window so the plugin
 	// stays decoupled from the widget.
+	// Re-poll getUser at widget interaction boundaries (panel open, mount).
+	// This catches "user logged in while widget was idle" without setting
+	// up a polling timer that would tick on background tabs. Identify dedupe
+	// via fingerprint inside identifyIfChanged means same-user re-polls are
+	// no-ops on the network.
+	function pollGetUser(): void {
+		resolveAndApplyGetUser()
+	}
+
 	function notifyShadowUpdate(reason: 'mount' | 'panel-open'): void {
 		try {
 			window.dispatchEvent(
@@ -320,6 +379,7 @@ export function initUseroFeedbackWidget(
 		screenshotError = null
 		isUploadingScreenshot = false
 		apiClient.ping()
+		pollGetUser()
 		onOpen?.()
 		render()
 		// The panel's interactive content is `innerHTML`-ed inside the shadow
@@ -791,6 +851,10 @@ export function initUseroFeedbackWidget(
 		open,
 		close,
 		whenReady: () => readyPromise,
+		identify: (user: UseroUser | null) => {
+			if (destroyed) return
+			applyResolvedUser(user)
+		},
 		update: next => {
 			if (destroyed) return
 			let needsRender = false
@@ -837,6 +901,11 @@ export function initUseroFeedbackWidget(
 			if ('onError' in next) onError = next.onError
 			if ('onOpen' in next) onOpen = next.onOpen
 			if ('onClose' in next) onClose = next.onClose
+			if ('getUser' in next) getUserFn = next.getUser
+			// Identity: React wrapper hot-swaps `user` here on every render.
+			// applyResolvedUser dedupes via fingerprint, so passing the same
+			// user object is a no-op transport-wise.
+			if ('user' in next) applyResolvedUser(next.user)
 			if (needsRender) render()
 		},
 	}

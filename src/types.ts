@@ -53,6 +53,21 @@ export interface FeedbackData {
 	metadata: FeedbackMetadata
 }
 
+// Customer-supplied identity for the session-replay / identify pipeline.
+// Use the declarative form: pass `user` on the React widget (the SDK
+// diffs and auto-fires identify), or supply `getUser` on the vanilla
+// init (the SDK polls it at session start). An imperative `identify()`
+// call exists as an escape hatch only and is intentionally not
+// documented as the headline API.
+export type UseroUserTraitValue = string | number | boolean | null
+export type UseroUserTraits = Record<string, UseroUserTraitValue>
+export interface UseroUser {
+	id: string
+	email?: string
+	displayName?: string
+	traits?: UseroUserTraits
+}
+
 export type WidgetPosition = 'right' | 'left'
 
 export interface WidgetTheme {
@@ -79,6 +94,13 @@ export interface FeedbackWidgetProps {
 	baseUrl?: string
 	metadata?: Record<string, unknown>
 	plugins?: ReadonlyArray<import('./plugin').UseroPlugin>
+	// Declarative identity. React: pass the current user (or null on
+	// logout) and the SDK auto-fires identify when the resolved id
+	// transitions. Vanilla: pass a getter so the SDK can resolve user at
+	// session start / chunk boundaries. Pass at most one. The SDK never
+	// invokes both.
+	user?: UseroUser | null
+	getUser?: () => UseroUser | null | undefined
 	onSubmit?: (feedback: FeedbackData) => void
 	onError?: (error: Error) => void
 	onOpen?: () => void

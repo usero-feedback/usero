@@ -31,6 +31,7 @@
 // the engagement gate, so consumers who lose the dice roll or navigate
 // away inside the gate window pay zero rrweb bytes.
 
+import { getOrMintAnonymousId } from '../identity'
 import type { UseroPlugin, PluginContext } from '../plugin'
 
 export interface ReplaySampling {
@@ -219,6 +220,7 @@ async function createSession(
 	apiUrl: string,
 	clientId: string,
 	sdkSessionId: string,
+	anonymousId: string,
 ): Promise<CreateSessionResult | null> {
 	try {
 		const startUrl =
@@ -231,6 +233,7 @@ async function createSession(
 			body: JSON.stringify({
 				clientId,
 				sdkSessionId,
+				anonymousId,
 				startUrl,
 				userAgent,
 				startedAt: new Date().toISOString(),
@@ -514,6 +517,9 @@ export function sessionReplay(options: SessionReplayOptions = {}): UseroPlugin {
 				return
 			}
 			const sdkSessionId = mintSdkSessionId()
+			// Mint or read the cross-session anonymousId. Cached in module
+			// scope after the first call, so this stays O(1) on hot paths.
+			const anonymousId = getOrMintAnonymousId()
 
 			const store: ReplayStore = {
 				options: { ...merged, apiUrl },
@@ -553,7 +559,7 @@ export function sessionReplay(options: SessionReplayOptions = {}): UseroPlugin {
 
 			const begin = async (): Promise<void> => {
 				if (store.cancelled) return
-				const created = await createSession(apiUrl, ctx.clientId, sdkSessionId)
+				const created = await createSession(apiUrl, ctx.clientId, sdkSessionId, anonymousId)
 				if (!created) {
 					ctx.logger.warn('session create failed, replay disabled')
 					store.stopped = true

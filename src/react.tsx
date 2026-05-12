@@ -25,6 +25,9 @@ export type {
 	FeedbackSubmission,
 	FeedbackWidgetProps,
 	ScreenshotData,
+	UseroUser,
+	UseroUserTraitValue,
+	UseroUserTraits,
 	WidgetPosition,
 	WidgetTheme,
 } from './types'
@@ -102,6 +105,24 @@ export function UseroFeedbackWidget(props: FeedbackWidgetProps): null {
 		props.environment,
 		metadataJson,
 	])
+
+	// Identity: diff the resolved user by id + email + serialised traits.
+	// Re-renders that pass the same logical user are no-ops at the
+	// transport layer too (identifyIfChanged dedupes by fingerprint).
+	const userId = props.user?.id ?? null
+	const userEmail = props.user?.email ?? null
+	const userDisplayName = props.user?.displayName ?? null
+	const userTraitsJson = JSON.stringify(props.user?.traits ?? null)
+	const userIsNull = props.user === null
+	useEffect(() => {
+		const handle = handleRef.current
+		if (!handle) return
+		// `user: undefined` means "not supplied, do nothing". `user: null`
+		// means "logged out, rotate anonymousId". We forward both as-is so
+		// vanilla can disambiguate via the `'user' in next` check.
+		if (props.user !== undefined) handle.update({ user: props.user })
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [userId, userEmail, userDisplayName, userTraitsJson, userIsNull])
 
 	return null
 }
