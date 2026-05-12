@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1
+
+- Session replay: tighten memory-retention defaults so consumers don't have to tune anything. The plugin now passes `checkoutEveryNms: 60_000` to rrweb so the mirror resets every 60s and detached SPA subtrees become GC-eligible. Default flush cadence drops from 10s to 3s and the per-chunk event cap from 5000 to 1000, plus a new `chunkMaxBytes` cap (default ~512 KB pre-gzip) forces a flush on event-heavy pages before the buffer balloons. The in-flight upload queue is capped at 3, and further chunks are dropped with a rate-limited warn rather than stacking event arrays in closures on slow networks. All knobs (`chunkSeconds`, `chunkMaxEvents`, `chunkMaxBytes`, `checkoutEveryMs`) are exposed as `SessionReplayOptions` for advanced tuning. `onDestroy` also nulls out the rrweb `record` reference for cleanliness.
+
 ## 0.4.0
 
 - User identity: declarative-first identification with `sendBeacon` durability. The session-replay plugin now persists an `anonymousId` in `localStorage` and includes it when opening a `SessionReplay` row, so anonymous sessions stay stitched across reloads and tabs. `UseroFeedbackWidget` (React) accepts a `user` prop and the vanilla `init()` accepts a `getUser` callback, both of which flow through to replay session creation and are re-sent on identity change. Finalisation on `pagehide` now uses `navigator.sendBeacon` so the last chunk and identity update survive tab close. The imperative `handle.identify()` API is preserved as an escape hatch for non-declarative flows.

@@ -11,7 +11,18 @@ import assert from 'node:assert/strict'
 
 import { __test__ } from '../dist/plugins/session-replay.js'
 
-const { uint8ToBase64, gzipBytes, joinUrl, uploadChunk, createSession, HARD_CHUNK_BYTE_CAP, SDK_SESSION_STORAGE_KEY } = __test__
+const {
+	uint8ToBase64,
+	gzipBytes,
+	joinUrl,
+	uploadChunk,
+	createSession,
+	scheduleChunkUpload,
+	HARD_CHUNK_BYTE_CAP,
+	SDK_SESSION_STORAGE_KEY,
+	MAX_PENDING_UPLOADS,
+	DEFAULTS,
+} = __test__
 
 const silentLogger = {
 	debug: () => {},
@@ -222,4 +233,115 @@ test('createSession: returns null on network failure', async () => {
 	}
 	const result = await createSession('https://api.example.com', 'cl', 'sdk-1')
 	assert.equal(result, null)
+})
+
+// Memory-retention defaults: keep buffers shallow so detached DOM is GC-able.
+test('defaults: tight flush cadence + checkout interval', () => {
+	assert.equal(DEFAULTS.chunkSeconds, 3)
+	assert.equal(DEFAULTS.chunkMaxEvents, 1000)
+	assert.equal(DEFAULTS.chunkMaxBytes, 512_000)
+	assert.equal(DEFAULTS.checkoutEveryMs, 60_000)
+})
+
+function makeStore(overrides = {}) {
+	return {
+		options: { ...DEFAULTS, apiUrl: 'https://api.example.com' },
+		clientId: 'c',
+		sdkSessionId: 'sdk-x',
+		sessionReplayId: 'r-x',
+		recordingStartedAt: 0,
+		pendingEvents: [],
+		pendingBytes: 0,
+		pendingFirstTs: null,
+		pendingLastTs: null,
+		lastUploadDropWarnAt: 0,
+		nextChunkSeq: 0,
+		uploadQueue: Promise.resolve(),
+		pendingUploads: 0,
+		chunkFlushTimer: null,
+		startTimer: null,
+		pageHideHandler: null,
+		shadowUpdateHandler: null,
+		record: null,
+		stopRecording: null,
+		loadInProgress: false,
+		cancelled: false,
+		stopped: false,
+		...overrides,
+	}
+}
+
+function makeCtx() {
+	const warnings = []
+	return {
+		warnings,
+		ctx: {
+			clientId: 'c',
+			baseUrl: 'https://api.example.com',
+			logger: {
+				debug: () => {},
+				info: () => {},
+				warn: (...args) => warnings.push(args),
+				error: () => {},
+			},
+			getStore: () => null,
+			setStore: () => {},
+			resolveUser: () => {},
+		},
+	}
+}
+
+// uploadQueue depth cap: schedule drops chunks once MAX_PENDING_UPLOADS in flight
+test('scheduleChunkUpload: drops chunk when uploadQueue is saturated', () => {
+	const store = makeStore({
+		pendingEvents: [{ type: 0, data: {}, timestamp: 1 }],
+		pendingBytes: 10,
+		pendingFirstTs: 1,
+		pendingLastTs: 1,
+		pendingUploads: MAX_PENDING_UPLOADS,
+	})
+	const { ctx, warnings } = makeCtx()
+	scheduleChunkUpload(store, ctx)
+	// Drop path: buffer is cleared, no new upload queued, no seq increment.
+	assert.equal(store.pendingEvents.length, 0)
+	assert.equal(store.pendingBytes, 0)
+	assert.equal(store.nextChunkSeq, 0)
+	assert.equal(store.pendingUploads, MAX_PENDING_UPLOADS)
+	assert.equal(warnings.length, 1, 'should warn on drop')
+	assert.match(warnings[0][0], /upload queue full/)
+})
+
+// uploadQueue depth cap: warning is rate-limited
+test('scheduleChunkUpload: drop warning is rate-limited within the window', () => {
+	const store = makeStore({
+		pendingEvents: [{ type: 0, data: {}, timestamp: 1 }],
+		pendingBytes: 10,
+		pendingFirstTs: 1,
+		pendingLastTs: 1,
+		pendingUploads: MAX_PENDING_UPLOADS,
+		lastUploadDropWarnAt: Date.now(),
+	})
+	const { ctx, warnings } = makeCtx()
+	scheduleChunkUpload(store, ctx)
+	assert.equal(warnings.length, 0, 'recent warn should suppress repeat')
+})
+
+// scheduleChunkUpload: resets pendingBytes when buffer is swapped out
+test('scheduleChunkUpload: resets pendingBytes after handoff', async () => {
+	globalThis.fetch = async () => new Response('{"ok":true}', { status: 200 })
+	const store = makeStore({
+		pendingEvents: [{ type: 0, data: {}, timestamp: 1 }],
+		pendingBytes: 1234,
+		pendingFirstTs: 1,
+		pendingLastTs: 2,
+	})
+	const { ctx } = makeCtx()
+	scheduleChunkUpload(store, ctx)
+	assert.equal(store.pendingEvents.length, 0)
+	assert.equal(store.pendingBytes, 0)
+	assert.equal(store.pendingFirstTs, null)
+	assert.equal(store.pendingLastTs, null)
+	assert.equal(store.nextChunkSeq, 1)
+	await store.uploadQueue
+	assert.equal(store.pendingUploads, 0)
 })

@@ -62,14 +62,23 @@ export interface SessionReplayOptions {
 	// Block (entirely skip) DOM subtrees matching this selector. Default
 	// `[data-usero-block]`.
 	blockSelector?: string
-	// Flush a chunk every N seconds. Default 10. Smaller = more PUTs but
-	// less data lost on tab crash.
+	// Flush a chunk every N seconds. Default 3. Smaller = more PUTs but
+	// less data lost on tab crash and less time event refs retain detached
+	// DOM nodes in memory.
 	chunkSeconds?: number
 	// Soft cap on buffered events before forcing a flush, regardless of
-	// time. Default 5000.
+	// time. Default 1000.
 	chunkMaxEvents?: number
+	// Soft cap on estimated buffered bytes before forcing a flush. Default
+	// 512_000 (~500 KB pre-gzip). Keeps memory pressure bounded on event-heavy
+	// pages even when chunkMaxEvents hasn't been hit.
+	chunkMaxBytes?: number
 	// Max attempts per chunk before giving up. Default 5.
 	chunkMaxAttempts?: number
+	// Force rrweb to take a fresh full snapshot every N ms. This resets
+	// rrweb's internal mirror so detached DOM (e.g. SPA route changes)
+	// becomes GC-eligible. Default 60_000.
+	checkoutEveryMs?: number
 	// API origin. Override for self-hosted or local dev. Defaults to the
 	// PluginContext baseUrl threaded through by the widget.
 	apiUrl?: string
@@ -88,6 +97,7 @@ interface RrwebRecordOptions {
 	inlineStylesheet?: boolean
 	blockSelector?: string
 	sampling?: ReplaySampling
+	checkoutEveryNms?: number
 }
 
 interface RrwebRecordFn {
@@ -107,7 +117,9 @@ interface ResolvedOptions {
 	blockSelector: string
 	chunkSeconds: number
 	chunkMaxEvents: number
+	chunkMaxBytes: number
 	chunkMaxAttempts: number
+	checkoutEveryMs: number
 	apiUrl: string
 }
 
@@ -120,8 +132,10 @@ interface ReplayStore {
 	// Used to compute replayOffsetMs at feedback-submit time.
 	recordingStartedAt: number | null
 	pendingEvents: RrwebEvent[]
+	pendingBytes: number
 	pendingFirstTs: number | null
 	pendingLastTs: number | null
+	lastUploadDropWarnAt: number
 	nextChunkSeq: number
 	uploadQueue: Promise<void>
 	pendingUploads: number
@@ -145,14 +159,18 @@ const DEFAULTS: ResolvedOptions = {
 	maskTextSelector: '[data-usero-mask]',
 	inlineStylesheet: true,
 	blockSelector: '[data-usero-block]',
-	chunkSeconds: 10,
-	chunkMaxEvents: 5000,
+	chunkSeconds: 3,
+	chunkMaxEvents: 1000,
+	chunkMaxBytes: 512_000,
 	chunkMaxAttempts: 5,
+	checkoutEveryMs: 60_000,
 	apiUrl: '',
 }
 
 const SDK_SESSION_STORAGE_KEY = 'usero:session-replay:sdk-session-id'
 const HARD_CHUNK_BYTE_CAP = 4 * 1024 * 1024
+const MAX_PENDING_UPLOADS = 3
+const UPLOAD_DROP_WARN_INTERVAL_MS = 5000
 
 function uint8ToBase64(bytes: Uint8Array): string {
 	let binary = ''
@@ -341,6 +359,20 @@ async function loadRrwebRecord(): Promise<RrwebRecord | null> {
 function scheduleChunkUpload(store: ReplayStore, ctx: PluginContext): void {
 	if (!store.sessionReplayId) return
 	if (store.pendingEvents.length === 0) return
+	if (store.pendingUploads >= MAX_PENDING_UPLOADS) {
+		const now = Date.now()
+		if (now - store.lastUploadDropWarnAt > UPLOAD_DROP_WARN_INTERVAL_MS) {
+			store.lastUploadDropWarnAt = now
+			ctx.logger.warn(
+				`upload queue full (${store.pendingUploads} in-flight), dropping chunk to bound memory`,
+			)
+		}
+		store.pendingEvents = []
+		store.pendingBytes = 0
+		store.pendingFirstTs = null
+		store.pendingLastTs = null
+		return
+	}
 	// Chunk boundary: re-resolve the user. Captures mid-session login on
 	// replay-only installs that never open the widget. No-op via fingerprint
 	// dedupe if nothing changed.
@@ -357,6 +389,7 @@ function scheduleChunkUpload(store: ReplayStore, ctx: PluginContext): void {
 	const seq = store.nextChunkSeq
 	store.nextChunkSeq += 1
 	store.pendingEvents = []
+	store.pendingBytes = 0
 	store.pendingFirstTs = null
 	store.pendingLastTs = null
 
@@ -436,9 +469,21 @@ function startRecording(store: ReplayStore, ctx: PluginContext): void {
 					if (store.stopped || store.cancelled) return
 					if (store.recordingStartedAt === null) store.recordingStartedAt = event.timestamp
 					store.pendingEvents.push(event)
+					// Rough byte estimate keeps the in-memory buffer bounded on
+					// event-heavy pages without paying full serialize cost per flush check.
+					let approxBytes = 0
+					try {
+						approxBytes = JSON.stringify(event).length
+					} catch {
+						approxBytes = 0
+					}
+					store.pendingBytes += approxBytes
 					if (store.pendingFirstTs === null) store.pendingFirstTs = event.timestamp
 					store.pendingLastTs = event.timestamp
-					if (store.pendingEvents.length >= store.options.chunkMaxEvents) {
+					if (
+						store.pendingEvents.length >= store.options.chunkMaxEvents ||
+						store.pendingBytes >= store.options.chunkMaxBytes
+					) {
 						scheduleChunkUpload(store, ctx)
 					}
 				},
@@ -447,6 +492,7 @@ function startRecording(store: ReplayStore, ctx: PluginContext): void {
 				inlineStylesheet: store.options.inlineStylesheet,
 				blockSelector: store.options.blockSelector,
 				sampling: store.options.sampling,
+				checkoutEveryNms: store.options.checkoutEveryMs,
 			})
 			store.stopRecording = stop
 			store.record = record
@@ -536,8 +582,10 @@ export function sessionReplay(options: SessionReplayOptions = {}): UseroPlugin {
 				sessionReplayId: null,
 				recordingStartedAt: null,
 				pendingEvents: [],
+				pendingBytes: 0,
 				pendingFirstTs: null,
 				pendingLastTs: null,
+				lastUploadDropWarnAt: 0,
 				nextChunkSeq: 0,
 				uploadQueue: Promise.resolve(),
 				pendingUploads: 0,
@@ -652,6 +700,8 @@ export function sessionReplay(options: SessionReplayOptions = {}): UseroPlugin {
 			store.stopped = true
 			stopRrweb(store)
 			store.pendingEvents.length = 0
+			store.pendingBytes = 0
+			store.record = null
 		},
 	}
 }
@@ -678,6 +728,10 @@ export const __test__ = {
 	uploadChunk,
 	createSession,
 	joinUrl,
+	scheduleChunkUpload,
 	HARD_CHUNK_BYTE_CAP,
 	SDK_SESSION_STORAGE_KEY,
+	MAX_PENDING_UPLOADS,
+	UPLOAD_DROP_WARN_INTERVAL_MS,
+	DEFAULTS,
 }
