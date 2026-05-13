@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2
+
+- Session replay: drop the per-event `JSON.stringify(event).length` from the rrweb emit hot path. It was burning CPU on busy SPAs (hundreds of events/sec) and `.length` is UTF-16 unit count, not bytes, so it under-counted non-ASCII by ~2x. Replaced with a cheap per-event-type heuristic (full snapshots ~50KB, incrementals ~256B, everything else ~128B). `chunkMaxBytes` remains an approximate safety net; `chunkMaxEvents` is the primary signal between flushes.
+- Session replay: when the in-flight upload queue is saturated and a chunk is dropped, track a counter and surface it on the next successful chunk PUT via the `X-Usero-Dropped-Before` header so the playback viewer can render a gap marker. Reset on success.
+- Tests: wire `node --test tests/*.test.mjs` into `npm test`, `prepublishOnly`, and the GitHub Actions publish workflow so regressions block publish. Fix `createSession` test calls to pass `anonymousId` and assert it serializes into the request body.
+
 ## 0.4.1
 
 - Session replay: tighten memory-retention defaults so consumers don't have to tune anything. The plugin now passes `checkoutEveryNms: 60_000` to rrweb so the mirror resets every 60s and detached SPA subtrees become GC-eligible. Default flush cadence drops from 10s to 3s and the per-chunk event cap from 5000 to 1000, plus a new `chunkMaxBytes` cap (default ~512 KB pre-gzip) forces a flush on event-heavy pages before the buffer balloons. The in-flight upload queue is capped at 3, and further chunks are dropped with a rate-limited warn rather than stacking event arrays in closures on slow networks. All knobs (`chunkSeconds`, `chunkMaxEvents`, `chunkMaxBytes`, `checkoutEveryMs`) are exposed as `SessionReplayOptions` for advanced tuning. `onDestroy` also nulls out the rrweb `record` reference for cleanliness.

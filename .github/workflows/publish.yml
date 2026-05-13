@@ -67,6 +67,9 @@ jobs:
       - if: steps.check.outputs.already_published != 'true'
         run: npm run build
 
+      - if: steps.check.outputs.already_published != 'true'
+        run: node --test tests/*.test.mjs
+
       - name: Bump version (manual dispatch only)
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run != true && inputs.skip_bump != true
         run: |

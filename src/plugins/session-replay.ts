@@ -136,6 +136,10 @@ interface ReplayStore {
 	pendingFirstTs: number | null
 	pendingLastTs: number | null
 	lastUploadDropWarnAt: number
+	// Count of chunks dropped (queue saturation) since the last successful
+	// upload. Sent as a header on the next successful chunk PUT so the
+	// viewer can show a "gap here" marker. Reset on success.
+	droppedSinceLastUpload: number
 	nextChunkSeq: number
 	uploadQueue: Promise<void>
 	pendingUploads: number
@@ -228,6 +232,17 @@ function joinUrl(apiUrl: string, path: string): string {
 	return `${apiUrl.replace(/\/$/, '')}${path}`
 }
 
+// Cheap per-event byte estimate. Avoids JSON.stringify on the hot emit path.
+// rrweb EventType: 0=DomContentLoaded, 1=Load, 2=FullSnapshot, 3=IncrementalSnapshot,
+// 4=Meta, 5=Custom, 6=Plugin. Full snapshots are the only event class that's
+// genuinely large; everything else is well under a KB on average. Numbers
+// chosen to over-estimate slightly so chunkMaxBytes stays a safety net.
+function estimateEventBytes(event: RrwebEvent): number {
+	if (event.type === 2) return 50_000
+	if (event.type === 3) return 256
+	return 128
+}
+
 interface CreateSessionResult {
 	accepted: boolean
 	sessionReplayId?: string
@@ -288,6 +303,7 @@ async function uploadChunk(
 	durationMs: number,
 	logger: PluginContext['logger'],
 	maxAttempts: number,
+	droppedBefore: number,
 ): Promise<ChunkUploadResult> {
 	const url = joinUrl(
 		apiUrl,
@@ -306,15 +322,20 @@ async function uploadChunk(
 				bytes.byteOffset + bytes.byteLength,
 			) as ArrayBuffer
 			const blob = new Blob([buffer], { type: 'application/octet-stream' })
+			const headers: Record<string, string> = {
+				'Content-Type': 'application/octet-stream',
+				'X-Usero-Client-Id': clientId,
+				'X-Usero-Event-Count': String(eventCount),
+				'X-Usero-Duration-Ms': String(Math.max(0, Math.round(durationMs))),
+			}
+			// Signal a playback gap: how many chunks were dropped (queue
+			// saturation) between the previous successful upload and this one.
+			// Server-side viewer will use this to render a "missing data" marker.
+			if (droppedBefore > 0) headers['X-Usero-Dropped-Before'] = String(droppedBefore)
 			const res = await fetch(url, {
 				method: 'PUT',
 				body: blob,
-				headers: {
-					'Content-Type': 'application/octet-stream',
-					'X-Usero-Client-Id': clientId,
-					'X-Usero-Event-Count': String(eventCount),
-					'X-Usero-Duration-Ms': String(Math.max(0, Math.round(durationMs))),
-				},
+				headers,
 			})
 			if (res.ok) return { ok: true, stopSession: false }
 			// 409: server told us to stop (bot-dropped, or session already
@@ -371,6 +392,8 @@ function scheduleChunkUpload(store: ReplayStore, ctx: PluginContext): void {
 		store.pendingBytes = 0
 		store.pendingFirstTs = null
 		store.pendingLastTs = null
+		// Track for the next successful chunk so the viewer can render a gap.
+		store.droppedSinceLastUpload += 1
 		return
 	}
 	// Chunk boundary: re-resolve the user. Captures mid-session login on
@@ -398,6 +421,7 @@ function scheduleChunkUpload(store: ReplayStore, ctx: PluginContext): void {
 	const clientId = store.clientId
 	const maxAttempts = store.options.chunkMaxAttempts
 
+	const droppedBefore = store.droppedSinceLastUpload
 	store.pendingUploads += 1
 	store.uploadQueue = store.uploadQueue.then(async () => {
 		try {
@@ -420,7 +444,17 @@ function scheduleChunkUpload(store: ReplayStore, ctx: PluginContext): void {
 				durationMs,
 				ctx.logger,
 				maxAttempts,
+				droppedBefore,
 			)
+			if (result.ok && droppedBefore > 0) {
+				// Subtract what we just reported, rather than zeroing, so any
+				// drops that happened while this chunk was in flight still
+				// surface on the next successful upload.
+				store.droppedSinceLastUpload = Math.max(
+					0,
+					store.droppedSinceLastUpload - droppedBefore,
+				)
+			}
 			if (result.stopSession) {
 				store.stopped = true
 				stopRrweb(store)
@@ -469,15 +503,13 @@ function startRecording(store: ReplayStore, ctx: PluginContext): void {
 					if (store.stopped || store.cancelled) return
 					if (store.recordingStartedAt === null) store.recordingStartedAt = event.timestamp
 					store.pendingEvents.push(event)
-					// Rough byte estimate keeps the in-memory buffer bounded on
-					// event-heavy pages without paying full serialize cost per flush check.
-					let approxBytes = 0
-					try {
-						approxBytes = JSON.stringify(event).length
-					} catch {
-						approxBytes = 0
-					}
-					store.pendingBytes += approxBytes
+					// Hot path: rrweb fires hundreds of events/sec on busy SPAs.
+					// JSON.stringify-per-event burns CPU we don't have, and .length
+					// is UTF-16 units (under-counts non-ASCII by ~2x) so it was
+					// never a real byte count anyway. Use a per-type heuristic:
+					// full snapshots are huge, mutations are mid, everything else
+					// is cheap. chunkMaxBytes is documented as approximate.
+					store.pendingBytes += estimateEventBytes(event)
 					if (store.pendingFirstTs === null) store.pendingFirstTs = event.timestamp
 					store.pendingLastTs = event.timestamp
 					if (
@@ -586,6 +618,7 @@ export function sessionReplay(options: SessionReplayOptions = {}): UseroPlugin {
 				pendingFirstTs: null,
 				pendingLastTs: null,
 				lastUploadDropWarnAt: 0,
+				droppedSinceLastUpload: 0,
 				nextChunkSeq: 0,
 				uploadQueue: Promise.resolve(),
 				pendingUploads: 0,

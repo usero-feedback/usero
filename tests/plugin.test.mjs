@@ -83,6 +83,7 @@ test('uploadChunk: succeeds on first attempt and sends the right headers', async
 		2500,
 		silentLogger,
 		5,
+		0,
 	)
 	assert.equal(result.ok, true)
 	assert.equal(result.stopSession, false)
@@ -93,6 +94,33 @@ test('uploadChunk: succeeds on first attempt and sends the right headers', async
 	assert.equal(calls[0].init.headers['X-Usero-Client-Id'], 'client-x')
 	assert.equal(calls[0].init.headers['X-Usero-Event-Count'], '7')
 	assert.equal(calls[0].init.headers['X-Usero-Duration-Ms'], '2500')
+	assert.equal(
+		calls[0].init.headers['X-Usero-Dropped-Before'],
+		undefined,
+		'no dropped-before header when count is 0',
+	)
+})
+
+// uploadChunk: sends X-Usero-Dropped-Before when chunks were dropped
+test('uploadChunk: includes X-Usero-Dropped-Before header when droppedBefore > 0', async () => {
+	const calls = []
+	globalThis.fetch = async (url, init) => {
+		calls.push({ url, init })
+		return new Response('{"ok":true}', { status: 200 })
+	}
+	await uploadChunk(
+		'https://api.example.com',
+		'sess-1',
+		'client-x',
+		3,
+		new Uint8Array([1]),
+		1,
+		0,
+		silentLogger,
+		5,
+		2,
+	)
+	assert.equal(calls[0].init.headers['X-Usero-Dropped-Before'], '2')
 })
 
 // uploadChunk: 409 stops the session immediately
@@ -112,6 +140,7 @@ test('uploadChunk: 409 returns stopSession=true with no retry', async () => {
 		0,
 		silentLogger,
 		5,
+		0,
 	)
 	assert.equal(result.ok, false)
 	assert.equal(result.stopSession, true)
@@ -136,6 +165,7 @@ test('uploadChunk: retries 5xx and succeeds on later attempt', async () => {
 		0,
 		silentLogger,
 		5,
+		0,
 	)
 	assert.equal(result.ok, true)
 	assert.equal(calls, 3, 'should retry until success')
@@ -165,6 +195,7 @@ test('uploadChunk: resends the same seq across retries (server makes idempotent)
 		0,
 		silentLogger,
 		5,
+		0,
 	)
 	assert.equal(result.ok, true)
 	assert.deepEqual(seqs, [7, 7])
@@ -187,6 +218,7 @@ test('uploadChunk: 400 gives up immediately', async () => {
 		0,
 		silentLogger,
 		5,
+		0,
 	)
 	assert.equal(result.ok, false)
 	assert.equal(result.stopSession, false)
@@ -206,10 +238,11 @@ test('createSession: parses {accepted,sessionReplayId}', async () => {
 	// Stub minimal browser globals so createSession can read href + UA.
 	globalThis.window = { location: { href: 'https://host.example/page' } }
 	globalThis.navigator = { userAgent: 'jest-ua' }
-	const result = await createSession('https://api.example.com', 'cl', 'sdk-1')
+	const result = await createSession('https://api.example.com', 'cl', 'sdk-1', 'test-anon-123')
 	assert.deepEqual(result, { accepted: true, sessionReplayId: 'r-123' })
 	assert.equal(body.clientId, 'cl')
 	assert.equal(body.sdkSessionId, 'sdk-1')
+	assert.equal(body.anonymousId, 'test-anon-123', 'anonymousId must be serialized into the body')
 	assert.equal(body.startUrl, 'https://host.example/page')
 	assert.equal(body.userAgent, 'jest-ua')
 	assert.match(body.startedAt, /^\d{4}-\d{2}-\d{2}T/)
@@ -222,7 +255,7 @@ test('createSession: returns accepted=false when bot-gated', async () => {
 			JSON.stringify({ accepted: false, dropReason: 'bot' }),
 			{ status: 200, headers: { 'Content-Type': 'application/json' } },
 		)
-	const result = await createSession('https://api.example.com', 'cl', 'sdk-1')
+	const result = await createSession('https://api.example.com', 'cl', 'sdk-1', 'test-anon-123')
 	assert.deepEqual(result, { accepted: false, dropReason: 'bot' })
 })
 
@@ -231,7 +264,7 @@ test('createSession: returns null on network failure', async () => {
 	globalThis.fetch = async () => {
 		throw new TypeError('offline')
 	}
-	const result = await createSession('https://api.example.com', 'cl', 'sdk-1')
+	const result = await createSession('https://api.example.com', 'cl', 'sdk-1', 'test-anon-123')
 	assert.equal(result, null)
 })
 
@@ -255,6 +288,7 @@ function makeStore(overrides = {}) {
 		pendingFirstTs: null,
 		pendingLastTs: null,
 		lastUploadDropWarnAt: 0,
+		droppedSinceLastUpload: 0,
 		nextChunkSeq: 0,
 		uploadQueue: Promise.resolve(),
 		pendingUploads: 0,
@@ -324,6 +358,46 @@ test('scheduleChunkUpload: drop warning is rate-limited within the window', () =
 	const { ctx, warnings } = makeCtx()
 	scheduleChunkUpload(store, ctx)
 	assert.equal(warnings.length, 0, 'recent warn should suppress repeat')
+})
+
+// drop counter: increments on saturation drop, decrements after successful upload
+test('scheduleChunkUpload: increments droppedSinceLastUpload on saturation drop', () => {
+	const store = makeStore({
+		pendingEvents: [{ type: 0, data: {}, timestamp: 1 }],
+		pendingBytes: 10,
+		pendingFirstTs: 1,
+		pendingLastTs: 1,
+		pendingUploads: MAX_PENDING_UPLOADS,
+	})
+	const { ctx } = makeCtx()
+	scheduleChunkUpload(store, ctx)
+	// Buffer was cleared by the drop path; re-prime before the next attempt.
+	store.pendingEvents = [{ type: 0, data: {}, timestamp: 2 }]
+	store.pendingBytes = 10
+	store.pendingFirstTs = 2
+	store.pendingLastTs = 2
+	scheduleChunkUpload(store, ctx)
+	assert.equal(store.droppedSinceLastUpload, 2)
+})
+
+test('scheduleChunkUpload: successful upload clears droppedSinceLastUpload and sends header', async () => {
+	const calls = []
+	globalThis.fetch = async (url, init) => {
+		calls.push({ url, init })
+		return new Response('{"ok":true}', { status: 200 })
+	}
+	const store = makeStore({
+		pendingEvents: [{ type: 0, data: {}, timestamp: 1 }],
+		pendingBytes: 10,
+		pendingFirstTs: 1,
+		pendingLastTs: 2,
+		droppedSinceLastUpload: 3,
+	})
+	const { ctx } = makeCtx()
+	scheduleChunkUpload(store, ctx)
+	await store.uploadQueue
+	assert.equal(store.droppedSinceLastUpload, 0)
+	assert.equal(calls[0].init.headers['X-Usero-Dropped-Before'], '3')
 })
 
 // scheduleChunkUpload: resets pendingBytes when buffer is swapped out

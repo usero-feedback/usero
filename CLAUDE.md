@@ -67,4 +67,4 @@ The legacy `react-feedback-collector` package is consumed by a separate list of 
 
 - `npm run typecheck`: tsc with `--noEmit`.
 - `npm run build`: tsup, produces ESM + CJS + DTS.
-- No test runner is wired up. Add one if introducing complex logic.
+- `npm test`: builds, then runs `node --test tests/*.test.mjs`. Tests import the built ESM from `dist/`, so the build step is part of `test`. Also wired into `prepublishOnly` and the GitHub Actions publish workflow, so a failing test blocks the publish.
