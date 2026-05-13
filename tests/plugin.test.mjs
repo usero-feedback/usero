@@ -236,8 +236,18 @@ test('createSession: parses {accepted,sessionReplayId}', async () => {
 		)
 	}
 	// Stub minimal browser globals so createSession can read href + UA.
-	globalThis.window = { location: { href: 'https://host.example/page' } }
-	globalThis.navigator = { userAgent: 'jest-ua' }
+	// Node 22 makes globalThis.navigator a read-only accessor, so plain
+	// assignment throws. defineProperty side-steps that.
+	Object.defineProperty(globalThis, 'window', {
+		value: { location: { href: 'https://host.example/page' } },
+		configurable: true,
+		writable: true,
+	})
+	Object.defineProperty(globalThis, 'navigator', {
+		value: { userAgent: 'jest-ua' },
+		configurable: true,
+		writable: true,
+	})
 	const result = await createSession('https://api.example.com', 'cl', 'sdk-1', 'test-anon-123')
 	assert.deepEqual(result, { accepted: true, sessionReplayId: 'r-123' })
 	assert.equal(body.clientId, 'cl')
