@@ -438,7 +438,7 @@ function renderIndicatorState(store: RecorderStore): void {
 	if (!root) return
 	const dot = root.querySelector('.dot')
 	const label = root.querySelector('.label')
-	const btn = root.querySelector<HTMLButtonElement>('.btn')
+	const btn = root.querySelector<HTMLButtonElement>('.finish-btn')
 	if (!(dot instanceof HTMLElement) || !(label instanceof HTMLElement) || !btn) return
 	dot.setAttribute('data-state', store.indicatorState)
 	switch (store.indicatorState) {
