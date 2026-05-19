@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+		<title>Usero User-Test Plugin — Onsite Tasks Demo</title>
+		<style>
+			body {
+				font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+				margin: 0;
+				padding: 32px 20px 160px;
+				color: #111;
+				background: #f7f7f8;
+			}
+			.wrap {
+				max-width: 640px;
+				margin: 0 auto;
+				background: #fff;
+				border-radius: 16px;
+				padding: 28px 24px;
+				box-shadow: 0 6px 20px rgba(0, 0, 0, 0.06);
+			}
+			h1 { margin: 0 0 8px; font-size: 22px; }
+			p { color: #4b5563; line-height: 1.5; }
+			code { background: #f1f1f3; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+			button.demo {
+				appearance: none; border: 0; background: #2563eb; color: #fff;
+				padding: 10px 14px; border-radius: 8px; font-weight: 600; cursor: pointer;
+				margin-right: 8px; margin-bottom: 8px;
+			}
+		</style>
+	</head>
+	<body>
+		<div class="wrap">
+			<h1>Usero User-Test Plugin — Onsite Tasks Demo</h1>
+			<p>
+				This page mounts the <code>user-test</code> plugin with a <strong>stubbed</strong>
+				<code>POST /api/user-test-sessions</code> response. No SaaS or microphone required — the recorder is short-circuited
+				so you can click around the pill, tasks panel, and outside-click / Escape behavior in isolation.
+			</p>
+			<p>Switch between scenarios:</p>
+			<p>
+				<button class="demo" onclick="location.search='?usero_test=demo&tasks=3'">3 tasks</button>
+				<button class="demo" onclick="location.search='?usero_test=demo&tasks=8'">8 tasks (scrollable)</button>
+				<button class="demo" onclick="location.search='?usero_test=demo&tasks=0'">0 tasks (today's pill, no toggle)</button>
+				<button class="demo" onclick="location.search=''">Reset (idle)</button>
+			</p>
+			<p>What to check:</p>
+			<ul>
+				<li>Tasks (N) button appears to the left of Finish; clicking toggles the panel above the pill.</li>
+				<li>Click outside the panel/pill to close. Press Escape to close.</li>
+				<li>State persists across reload (sessionStorage key <code>usero:user-test:tasks-panel-open</code>).</li>
+				<li>With <code>tasks=0</code>, the pill is identical to today (no Tasks button).</li>
+				<li>Resize to 375px wide: panel stays within viewport, taps work.</li>
+			</ul>
+		</div>
+
+		<script type="module">
+			import { userTest } from "../dist/plugins/user-test.js"
+
+			const params = new URLSearchParams(location.search)
+			const taskCount = Number(params.get("tasks") ?? "3")
+
+			// Stub fetch BEFORE invoking the plugin. We intercept the three endpoints
+			// the plugin hits and return synthetic responses so no SaaS is required.
+			const realFetch = window.fetch.bind(window)
+			window.fetch = async (input, init) => {
+				const url = typeof input === "string" ? input : input.url
+				if (url.endsWith("/api/user-test-sessions") && init?.method === "POST") {
+					const tasks = Array.from({ length: taskCount }, (_, i) => ({
+						id: `task_${i + 1}`,
+						sortOrder: i,
+						prompt: [
+							"Sign up for a new account using a real email.",
+							"Find the pricing page and tell us which plan you'd pick.",
+							"Try to invite a teammate — narrate any confusion.",
+							"Create your first project and add one item to it.",
+							"Find the settings page and change your timezone.",
+							"Search for a feature you'd expect but don't see.",
+							"Try the mobile layout (resize the window).",
+							"Cancel/close the flow you started — does it feel safe?",
+						][i] ?? `Task ${i + 1}`,
+					}))
+					return new Response(
+						JSON.stringify({
+							sessionId: "demo-session-id",
+							clientId: "demo-client-id",
+							startedAt: new Date().toISOString(),
+							tasks,
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					)
+				}
+				if (url.includes("/chunk?index=") || url.endsWith("/finalise")) {
+					return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } })
+				}
+				return realFetch(input, init)
+			}
+
+			// Also short-circuit getUserMedia so we don't trigger a real mic prompt.
+			if (navigator.mediaDevices) {
+				navigator.mediaDevices.getUserMedia = async () => { throw new Error("mic disabled in demo") }
+			}
+
+			const plugin = userTest({ apiUrl: "http://localhost", chunkSeconds: 30 })
+			const storeRef = { value: undefined }
+			plugin.onInit?.({
+				clientId: "demo",
+				baseUrl: "http://localhost",
+				getStore: () => storeRef.value,
+				setStore: (v) => { storeRef.value = v },
+				logger: {
+					debug: (...a) => console.debug("[usero:user-test]", ...a),
+					info: (...a) => console.info("[usero:user-test]", ...a),
+					warn: (...a) => console.warn("[usero:user-test]", ...a),
+					error: (...a) => console.error("[usero:user-test]", ...a),
+				},
+			})
+		</script>
+	</body>
+</html>

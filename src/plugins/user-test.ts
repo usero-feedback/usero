@@ -48,6 +48,12 @@ export interface UserTestOptions {
 	hideIndicator?: boolean
 }
 
+interface UserTestTask {
+	id: string
+	prompt: string
+	sortOrder: number
+}
+
 interface RecorderStore {
 	cancelled: boolean
 	slug: string
@@ -64,6 +70,10 @@ interface RecorderStore {
 	indicatorState: 'recording' | 'finishing' | 'done' | 'no-audio' | 'error'
 	pageHideHandler: (() => void) | null
 	options: Required<UserTestOptions>
+	tasks: UserTestTask[]
+	tasksPanelOpen: boolean
+	outsidePointerHandler: ((event: PointerEvent) => void) | null
+	keydownHandler: ((event: KeyboardEvent) => void) | null
 }
 
 const DEFAULT_OPTIONS: Required<Omit<UserTestOptions, 'testerName' | 'apiUrl'>> & {
@@ -78,6 +88,7 @@ const DEFAULT_OPTIONS: Required<Omit<UserTestOptions, 'testerName' | 'apiUrl'>> 
 }
 
 const TESTER_NAME_STORAGE_KEY = 'usero:user-test:tester-name'
+const TASKS_PANEL_OPEN_STORAGE_KEY = 'usero:user-test:tasks-panel-open'
 const IDB_NAME = 'usero-user-test'
 const IDB_STORE = 'pending-chunks'
 
@@ -242,34 +253,44 @@ async function uploadChunkWithRetry(
 	return false
 }
 
-function buildIndicator(host: HTMLElement, store: RecorderStore, onFinish: () => void): ShadowRoot {
+function buildIndicator(host: HTMLElement, store: RecorderStore, onFinish: () => void, onToggleTasks: () => void): ShadowRoot {
 	const root = host.attachShadow({ mode: 'closed' })
 	const style = document.createElement('style')
 	// Keep this CSS small. Pulse is the only animation. Bottom-center,
 	// safe-area aware, semi-transparent so it doesn't block the page.
 	style.textContent = `
 		:host { all: initial; }
-		.bar {
+		.anchor {
 			position: fixed;
 			bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
-			left: 50%;
-			transform: translateX(-50%);
-			display: inline-flex;
-			align-items: center;
-			gap: 10px;
-			padding: 8px 14px 8px 12px;
-			background: rgba(17, 17, 17, 0.78);
+			left: 50%; transform: translateX(-50%);
+			display: flex; flex-direction: column; align-items: center; gap: 8px;
+			z-index: 2147483646; max-width: calc(100vw - 32px);
+			font: 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
 			color: #fff;
-			border-radius: 999px;
-			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-			font-size: 13px;
-			line-height: 1;
-			box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
-			backdrop-filter: blur(8px);
-			-webkit-backdrop-filter: blur(8px);
-			z-index: 2147483646;
-			max-width: calc(100vw - 32px);
 		}
+		.bar {
+			display: inline-flex; align-items: center; gap: 10px;
+			padding: 8px 14px 8px 12px;
+			background: rgba(17,17,17,0.78);
+			border-radius: 999px;
+			box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+			backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+			max-width: 100%;
+		}
+		.panel {
+			background: rgba(17,17,17,0.88);
+			border-radius: 14px; padding: 12px 14px 12px 8px;
+			line-height: 1.45;
+			box-shadow: 0 12px 32px rgba(0,0,0,0.28);
+			max-height: min(60vh, 480px);
+			max-width: min(420px, calc(100vw - 32px));
+			width: max-content; overflow-y: auto;
+		}
+		.panel[hidden] { display: none; }
+		.panel ol { margin: 0; padding-left: 26px; }
+		.panel li { margin: 0 0 8px; }
+		.panel li:last-child { margin: 0; }
 		.dot {
 			width: 8px; height: 8px; border-radius: 50%;
 			background: #ef4444;
@@ -291,6 +312,8 @@ function buildIndicator(host: HTMLElement, store: RecorderStore, onFinish: () =>
 		.btn:hover { background: rgba(255,255,255,0.22); }
 		.btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 		.btn[disabled] { opacity: 0.5; cursor: progress; }
+		.tasks-btn[aria-expanded="true"] { background: rgba(255,255,255,0.24); }
+		@media (max-width: 420px) { .btn { padding: 9px 14px; min-height: 40px; } }
 		.thanks {
 			position: fixed; inset: 0;
 			display: grid; place-items: center;
@@ -327,6 +350,13 @@ function buildIndicator(host: HTMLElement, store: RecorderStore, onFinish: () =>
 			.dot { animation: none; }
 		}
 	`
+	const anchor = document.createElement('div')
+	anchor.className = 'anchor'
+
+	const panel = document.createElement('div')
+	panel.className = 'panel'
+	panel.hidden = true
+
 	const bar = document.createElement('div')
 	bar.className = 'bar'
 	bar.setAttribute('role', 'status')
@@ -343,20 +373,64 @@ function buildIndicator(host: HTMLElement, store: RecorderStore, onFinish: () =>
 	const spacer = document.createElement('span')
 	spacer.className = 'spacer'
 
-	const btn = document.createElement('button')
-	btn.type = 'button'
-	btn.className = 'btn'
-	btn.textContent = 'Finish'
-	btn.addEventListener('click', onFinish)
-
 	bar.appendChild(dot)
 	bar.appendChild(label)
 	bar.appendChild(spacer)
+
+	const btn = document.createElement('button')
+	btn.type = 'button'
+	btn.className = 'btn finish-btn'
+	btn.textContent = 'Finish'
+	btn.addEventListener('click', onFinish)
 	bar.appendChild(btn)
 
+	if (store.tasks.length > 0) installTasksToggle(bar, btn, store, onToggleTasks)
+
+	anchor.appendChild(panel)
+	anchor.appendChild(bar)
+
 	root.appendChild(style)
-	root.appendChild(bar)
+	root.appendChild(anchor)
 	return root
+}
+
+function installTasksToggle(bar: HTMLElement, finishBtn: HTMLElement, store: RecorderStore, onToggleTasks: () => void): void {
+	const tasksBtn = document.createElement('button')
+	tasksBtn.type = 'button'
+	tasksBtn.className = 'btn tasks-btn'
+	tasksBtn.textContent = `Tasks (${store.tasks.length})`
+	tasksBtn.setAttribute('aria-expanded', store.tasksPanelOpen ? 'true' : 'false')
+	tasksBtn.addEventListener('click', onToggleTasks)
+	bar.insertBefore(tasksBtn, finishBtn)
+}
+
+function renderTasksPanel(store: RecorderStore): void {
+	const root = store.indicatorRoot
+	if (!root) return
+	const panel = root.querySelector('.panel')
+	if (!(panel instanceof HTMLElement)) return
+	// Build content once.
+	if (!panel.firstChild && store.tasks.length > 0) {
+		const ol = document.createElement('ol')
+		for (const task of store.tasks) {
+			const li = document.createElement('li')
+			li.textContent = task.prompt
+			ol.appendChild(li)
+		}
+		panel.appendChild(ol)
+	}
+	panel.hidden = !store.tasksPanelOpen
+	const tasksBtn = root.querySelector('.tasks-btn')
+	if (tasksBtn instanceof HTMLElement) {
+		tasksBtn.setAttribute('aria-expanded', store.tasksPanelOpen ? 'true' : 'false')
+	}
+}
+
+function readTasksPanelOpen(): boolean {
+	try { return window.sessionStorage?.getItem(TASKS_PANEL_OPEN_STORAGE_KEY) === '1' } catch { return false }
+}
+function writeTasksPanelOpen(open: boolean): void {
+	try { window.sessionStorage?.setItem(TASKS_PANEL_OPEN_STORAGE_KEY, open ? '1' : '0') } catch { /* ignore */ }
 }
 
 function renderIndicatorState(store: RecorderStore): void {
@@ -409,11 +483,22 @@ function showThanksScreen(root: ShadowRoot): void {
 	root.appendChild(overlay)
 }
 
+function parseTasks(raw: unknown): UserTestTask[] {
+	if (!Array.isArray(raw)) return []
+	const out = raw.flatMap((item: unknown): UserTestTask[] => {
+		const t = item as { id?: unknown; prompt?: unknown; sortOrder?: unknown }
+		if (!t || typeof t.id !== 'string' || typeof t.prompt !== 'string' || typeof t.sortOrder !== 'number') return []
+		return [{ id: t.id, prompt: t.prompt, sortOrder: t.sortOrder }]
+	})
+	out.sort((a, b) => a.sortOrder - b.sortOrder)
+	return out
+}
+
 async function createSession(
 	apiUrl: string,
 	slug: string,
 	testerName: string | undefined,
-): Promise<{ sessionId: string; clientId: string } | null> {
+): Promise<{ sessionId: string; clientId: string; tasks: UserTestTask[] } | null> {
 	try {
 		const res = await fetch(`${apiUrl.replace(/\/$/, '')}/api/user-test-sessions`, {
 			method: 'POST',
@@ -421,9 +506,9 @@ async function createSession(
 			body: JSON.stringify({ slug, ...(testerName ? { testerName } : {}) }),
 		})
 		if (!res.ok) return null
-		const json = (await res.json()) as { sessionId?: unknown; clientId?: unknown }
+		const json = (await res.json()) as { sessionId?: unknown; clientId?: unknown; tasks?: unknown }
 		if (typeof json.sessionId !== 'string' || typeof json.clientId !== 'string') return null
-		return { sessionId: json.sessionId, clientId: json.clientId }
+		return { sessionId: json.sessionId, clientId: json.clientId, tasks: parseTasks(json.tasks) }
 	} catch {
 		return null
 	}
@@ -603,6 +688,10 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				indicatorState: 'recording',
 				pageHideHandler: null,
 				options: { ...merged, apiUrl },
+				tasks: [],
+				tasksPanelOpen: readTasksPanelOpen(),
+				outsidePointerHandler: null,
+				keydownHandler: null,
 			}
 			ctx.setStore(store)
 
@@ -610,14 +699,41 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				void finishFlow(store, ctx, { showThanks: true })
 			}
 
+			const setPanelOpen = (open: boolean): void => {
+				if (store.tasksPanelOpen === open) return
+				store.tasksPanelOpen = open
+				writeTasksPanelOpen(open)
+				renderTasksPanel(store)
+			}
+
+			const onToggleTasks = (): void => setPanelOpen(!store.tasksPanelOpen)
+
 			if (!merged.hideIndicator) {
 				const host = document.createElement('div')
 				host.setAttribute('data-usero-user-test', 'true')
 				document.body.appendChild(host)
 				store.indicator = host
-				store.indicatorRoot = buildIndicator(host, store, onFinish)
+				store.indicatorRoot = buildIndicator(host, store, onFinish, onToggleTasks)
 				renderIndicatorState(store)
 			}
+
+			// Outside-click + Escape close the tasks panel. Listen on document
+			// (composedPath checks shadow ancestry so taps on the panel/pill
+			// itself don't dismiss).
+			const outsidePointer = (event: PointerEvent): void => {
+				if (!store.tasksPanelOpen) return
+				const host = store.indicator
+				if (!host) return
+				const path = event.composedPath()
+				if (!path.includes(host)) setPanelOpen(false)
+			}
+			const onKeydown = (event: KeyboardEvent): void => {
+				if (event.key === 'Escape' && store.tasksPanelOpen) setPanelOpen(false)
+			}
+			store.outsidePointerHandler = outsidePointer
+			store.keydownHandler = onKeydown
+			document.addEventListener('pointerdown', outsidePointer, true)
+			document.addEventListener('keydown', onKeydown)
 
 			const pageHide = (): void => {
 				// Best-effort flush + finalise. We don't await here; the browser
@@ -639,6 +755,15 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				}
 				store.sessionId = created.sessionId
 				store.clientId = created.clientId
+				store.tasks = created.tasks
+				if (store.tasks.length > 0 && store.indicatorRoot && !merged.hideIndicator) {
+					const bar = store.indicatorRoot.querySelector('.bar')
+					const finishBtn = bar?.querySelector('.finish-btn')
+					if (bar instanceof HTMLElement && finishBtn instanceof HTMLElement && !bar.querySelector('.tasks-btn')) {
+						installTasksToggle(bar, finishBtn, store, onToggleTasks)
+					}
+					renderTasksPanel(store)
+				}
 				await startRecording(store, ctx)
 				renderIndicatorState(store)
 			})()
@@ -652,6 +777,14 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				store.pageHideHandler = null
 			}
 			stopRecording(store)
+			if (store.outsidePointerHandler) {
+				document.removeEventListener('pointerdown', store.outsidePointerHandler, true)
+				store.outsidePointerHandler = null
+			}
+			if (store.keydownHandler) {
+				document.removeEventListener('keydown', store.keydownHandler)
+				store.keydownHandler = null
+			}
 			if (store.indicator && store.indicator.parentNode) {
 				store.indicator.parentNode.removeChild(store.indicator)
 			}
