@@ -327,6 +327,7 @@ export function initUseroFeedbackWidget(
 
 	// State
 	let isOpen = false
+	let focusCommentNext = false
 	let selectedRating: FeedbackRating | undefined = undefined
 	let comment = ''
 	let shareEmail = false
@@ -405,6 +406,7 @@ export function initUseroFeedbackWidget(
 	function open(): void {
 		if (isOpen) return
 		isOpen = true
+		focusCommentNext = true
 		// Reset transient state
 		selectedRating = undefined
 		comment = ''
@@ -733,6 +735,7 @@ export function initUseroFeedbackWidget(
 					const value = btn.dataset.rating
 					if (value === '1' || value === '2' || value === '3' || value === '4') {
 						selectedRating = Number(value) as FeedbackRating
+						focusCommentNext = true
 						render()
 					}
 				})
@@ -742,6 +745,12 @@ export function initUseroFeedbackWidget(
 			'textarea[data-role="comment"]',
 		)
 		if (textarea) {
+			if (focusCommentNext) {
+				focusCommentNext = false
+				// Defer to next frame so the browser doesn't scroll the panel
+				// while it's still animating in.
+				requestAnimationFrame(() => textarea.focus({ preventScroll: true }))
+			}
 			textarea.addEventListener('input', () => {
 				if (textarea.value.length <= 1000) {
 					comment = textarea.value

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1
+
+- Feedback widget: restore autofocus on the comment textarea. Focuses on panel open and again after the user picks a rating, so they can start typing immediately. Uses `requestAnimationFrame` + `preventScroll` to avoid fighting the open animation.
+
 ## 0.4.2
 
 - Session replay: drop the per-event `JSON.stringify(event).length` from the rrweb emit hot path. It was burning CPU on busy SPAs (hundreds of events/sec) and `.length` is UTF-16 unit count, not bytes, so it under-counted non-ASCII by ~2x. Replaced with a cheap per-event-type heuristic (full snapshots ~50KB, incrementals ~256B, everything else ~128B). `chunkMaxBytes` remains an approximate safety net; `chunkMaxEvents` is the primary signal between flushes.
