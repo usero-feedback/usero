@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.2
+
+- Session replay: isolate rrweb FullSnapshot events into their own chunk so the 4MB-gzipped hard cap can't drop the playback anchor. When a FullSnapshot (rrweb event type 2) arrives, the pre-snapshot pending buffer is flushed first so the snapshot lands in a near-empty chunk, dramatically reducing the chance of a combined chunk crossing the cap and taking the anchor (and the following minute of playback) with it. Rate-limited to one isolation flush per 1500ms to prevent flush storms on SPA route-change snapshot bursts.
+- Session replay: count the 4MB hard-cap drop in `droppedSinceLastUpload` so the next successful chunk PUT surfaces it via the `X-Usero-Dropped-Before` header. Previously these oversized drops were silent server-side; now the viewer can render a gap marker.
+
 ## 0.5.1
 
 - Feedback widget: restore autofocus on the comment textarea. Focuses on panel open and again after the user picks a rating, so they can start typing immediately. Uses `requestAnimationFrame` + `preventScroll` to avoid fighting the open animation.

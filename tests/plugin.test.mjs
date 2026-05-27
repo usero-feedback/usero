@@ -299,6 +299,7 @@ function makeStore(overrides = {}) {
 		pendingLastTs: null,
 		lastUploadDropWarnAt: 0,
 		droppedSinceLastUpload: 0,
+		lastSnapshotFlushAt: 0,
 		nextChunkSeq: 0,
 		uploadQueue: Promise.resolve(),
 		pendingUploads: 0,

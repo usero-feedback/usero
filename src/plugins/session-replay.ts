@@ -140,6 +140,10 @@ interface ReplayStore {
 	// upload. Sent as a header on the next successful chunk PUT so the
 	// viewer can show a "gap here" marker. Reset on success.
 	droppedSinceLastUpload: number
+	// Wall-clock timestamp of the last snapshot-isolation flush. Used to
+	// rate-limit pre-snapshot flushes so SPA route-change snapshot bursts
+	// don't trigger a flush storm.
+	lastSnapshotFlushAt: number
 	nextChunkSeq: number
 	uploadQueue: Promise<void>
 	pendingUploads: number
@@ -175,6 +179,18 @@ const SDK_SESSION_STORAGE_KEY = 'usero:session-replay:sdk-session-id'
 const HARD_CHUNK_BYTE_CAP = 4 * 1024 * 1024
 const MAX_PENDING_UPLOADS = 3
 const UPLOAD_DROP_WARN_INTERVAL_MS = 5000
+// rrweb EventType.FullSnapshot. We don't import rrweb's enum because rrweb is
+// dynamically imported (bundle hygiene), so we'd have to pay the load cost
+// just to reference a constant. Magic number matches estimateEventBytes above
+// and rrweb's stable public event-type enum.
+const RRWEB_EVENT_TYPE_FULL_SNAPSHOT = 2
+// Minimum gap between back-to-back snapshot-isolation flushes. Snapshots
+// normally fire every checkoutEveryMs (default 60s), but rrweb can emit
+// additional ones on SPA route changes via checkoutEveryNms. Keeping this
+// below chunkSeconds * 1000 / 2 of the default (3000ms) and well under
+// checkoutEveryMs ensures isolation still happens for back-to-back snapshots
+// while preventing pathological flush storms.
+const SNAPSHOT_ISOLATION_MIN_GAP_MS = 1500
 
 function uint8ToBase64(bytes: Uint8Array): string {
 	let binary = ''
@@ -432,6 +448,10 @@ function scheduleChunkUpload(store: ReplayStore, ctx: PluginContext): void {
 				ctx.logger.error(
 					`chunk ${seq} exceeds 4MB hard cap (${bytes.byteLength} bytes), dropping`,
 				)
+				// Surface the drop on the next successful chunk so the viewer
+				// can render a gap marker. Without this, oversized chunks
+				// vanish without trace server-side.
+				store.droppedSinceLastUpload += 1
 				return
 			}
 			const result = await uploadChunk(
@@ -502,6 +522,24 @@ function startRecording(store: ReplayStore, ctx: PluginContext): void {
 				emit: event => {
 					if (store.stopped || store.cancelled) return
 					if (store.recordingStartedAt === null) store.recordingStartedAt = event.timestamp
+					// FullSnapshot isolation: the snapshot is the playback anchor
+					// for every subsequent incremental event. If a chunk crosses
+					// the 4MB gzipped hard cap, it's dropped wholesale, taking
+					// the anchor with it and breaking playback for up to a full
+					// checkoutEveryMs window, not just the chunk's own duration.
+					// Mitigate by flushing the pre-snapshot buffer separately so
+					// the snapshot lands in a near-empty chunk. Rate-limit to
+					// avoid flush storms on SPA route-change snapshot bursts.
+					if (event.type === RRWEB_EVENT_TYPE_FULL_SNAPSHOT) {
+						const now = Date.now()
+						if (
+							store.pendingEvents.length > 0 &&
+							now - store.lastSnapshotFlushAt >= SNAPSHOT_ISOLATION_MIN_GAP_MS
+						) {
+							scheduleChunkUpload(store, ctx)
+							store.lastSnapshotFlushAt = now
+						}
+					}
 					store.pendingEvents.push(event)
 					// Hot path: rrweb fires hundreds of events/sec on busy SPAs.
 					// JSON.stringify-per-event burns CPU we don't have, and .length
@@ -619,6 +657,7 @@ export function sessionReplay(options: SessionReplayOptions = {}): UseroPlugin {
 				pendingLastTs: null,
 				lastUploadDropWarnAt: 0,
 				droppedSinceLastUpload: 0,
+				lastSnapshotFlushAt: 0,
 				nextChunkSeq: 0,
 				uploadQueue: Promise.resolve(),
 				pendingUploads: 0,
