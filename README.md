@@ -187,6 +187,14 @@ Outputs:
 - `dist/plugins/session-replay.js` (ESM) + `.cjs` + `.d.ts` plus a sibling `dist/all-*.js` chunk that holds the bundled rrweb runtime. The plugin loads this chunk via dynamic `import()` so it only downloads when the plugin actually needs it.
 - `dist/usero.iife.js` (minified, exposes `window.Usero`)
 
+## WordPress plugin
+
+This repo is a monorepo. The `@usero/sdk` npm package lives at the root; the WordPress plugin lives in [`wordpress/`](./wordpress/) and ships to the wordpress.org plugin directory as `usero`.
+
+The plugin vendors the SDK's IIFE build at `wordpress/assets/js/vendor/usero-sdk.iife.js`. It is regenerated automatically on `npm run build` via `scripts/sync-wp-vendor.mjs`. Do not edit it by hand.
+
+To cut a plugin release see [`wordpress/RELEASE.md`](./wordpress/RELEASE.md). Tagging `v<version>` on GitHub triggers `.github/workflows/release-wordpress.yml`, which builds the SDK, verifies that `package.json`, `wordpress/usero.php`, and `wordpress/readme.txt` all agree on the version, then pushes to wordpress.org SVN via `10up/action-wordpress-plugin-deploy`.
+
 ## License
 
 MIT
