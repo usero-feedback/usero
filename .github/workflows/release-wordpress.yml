@@ -1,0 +1,67 @@
+name: Release WordPress plugin
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  deploy:
+    name: Deploy to wordpress.org SVN
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - run: npm ci
+
+      - name: Build SDK (regenerates wordpress/ vendor file)
+        run: npm run build
+
+      - name: Verify version consistency (package.json, usero.php, readme.txt)
+        run: |
+          set -euo pipefail
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PHP_VERSION=$(grep -E '^\s*\*\s*Version:' wordpress/usero.php | head -1 | sed -E 's/.*Version:[[:space:]]*//' | tr -d '[:space:]')
+          PHP_CONST_VERSION=$(grep -E "define\(\s*'USERO_VERSION'" wordpress/usero.php | sed -E "s/.*'USERO_VERSION',[[:space:]]*'([^']+)'.*/\1/")
+          README_VERSION=$(grep -E '^Stable tag:' wordpress/readme.txt | sed -E 's/^Stable tag:[[:space:]]*//' | tr -d '[:space:]')
+          echo "package.json:        $PKG_VERSION"
+          echo "git tag:             $TAG_VERSION"
+          echo "usero.php Version:   $PHP_VERSION"
+          echo "usero.php USERO_VERSION: $PHP_CONST_VERSION"
+          echo "readme.txt Stable tag:   $README_VERSION"
+          fail=0
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::package.json version ($PKG_VERSION) does not match git tag ($TAG_VERSION)"
+            fail=1
+          fi
+          if [ "$PKG_VERSION" != "$PHP_VERSION" ]; then
+            echo "::error::package.json version ($PKG_VERSION) does not match wordpress/usero.php Version header ($PHP_VERSION)"
+            fail=1
+          fi
+          if [ "$PKG_VERSION" != "$PHP_CONST_VERSION" ]; then
+            echo "::error::package.json version ($PKG_VERSION) does not match wordpress/usero.php USERO_VERSION constant ($PHP_CONST_VERSION)"
+            fail=1
+          fi
+          if [ "$PKG_VERSION" != "$README_VERSION" ]; then
+            echo "::error::package.json version ($PKG_VERSION) does not match wordpress/readme.txt Stable tag ($README_VERSION)"
+            fail=1
+          fi
+          if [ "$fail" -ne 0 ]; then
+            echo "Version mismatch. Bump all three (package.json, wordpress/usero.php, wordpress/readme.txt) to the same value before tagging."
+            exit 1
+          fi
+
+      - name: Deploy to wordpress.org
+        uses: 10up/action-wordpress-plugin-deploy@stable
+        env:
+          SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
+          SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
+          SLUG: usero
+          BUILD_DIR: ./wordpress
+          ASSETS_DIR: ./wordpress/assets
+          VERSION: ${{ github.ref_name }}

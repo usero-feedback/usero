@@ -1,0 +1,13 @@
+# Files and directories to exclude from the WordPress.org SVN ship.
+# Consumed by 10up/action-wordpress-plugin-deploy.
+# Anything that should appear in the user-facing plugin zip must NOT be listed here.
+
+.distignore
+.gitignore
+dev-artifacts/
+screenshots/
+SMOKE.md
+RELEASE.md
+*.log
+.DS_Store
+node_modules/

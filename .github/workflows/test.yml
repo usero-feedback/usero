@@ -1,0 +1,40 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  sdk:
+    name: SDK build + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Run tests
+        run: npm test
+
+  php-lint:
+    name: PHP lint (wordpress/)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "7.4"
+          tools: none
+          coverage: none
+
+      - name: Lint every PHP file in wordpress/
+        run: find wordpress -name "*.php" -print0 | xargs -0 -n1 php -l
