@@ -393,6 +393,48 @@ async function loadRrwebRecord(): Promise<RrwebRecord | null> {
 	}
 }
 
+// Decides whether to isolate a FullSnapshot event into its own chunk.
+//
+// rrweb FullSnapshots are the playback anchor for every subsequent
+// incremental event in the same chunk. If a chunk crosses the 4MB gzipped
+// hard cap (HARD_CHUNK_BYTE_CAP) it's dropped wholesale, taking the anchor
+// with it and breaking playback for up to a full checkoutEveryMs window.
+// To mitigate, we ship the snapshot in a near-empty chunk:
+//
+//   1. Pre-flush: if `pendingEvents` is non-empty, flush it now so the
+//      snapshot doesn't inherit the previous up-to-3s of incrementals.
+//   2. Caller pushes the snapshot event onto `pendingEvents`.
+//   3. Post-flush (if `didIsolate`): caller calls `scheduleChunkUpload`
+//      again so the snapshot ships solo, not bundled with the next up-to-3s
+//      of post-snapshot incrementals.
+//
+// Both pre- and post-flush share a single rate-limit window
+// (`lastSnapshotFlushAt` + `SNAPSHOT_ISOLATION_MIN_GAP_MS`) so SPA route-
+// change snapshot bursts can't trigger a flush storm. If the gate is
+// closed, neither flush fires; if open, both fire and the watermark is
+// updated. Pre-flush is conditional on a non-empty buffer (nothing to
+// flush otherwise); post-flush is unconditional once the gate is open
+// because the goal is to ship the snapshot solo regardless.
+//
+// Returns `{ didIsolate }` so the caller knows whether to do the
+// post-flush after pushing the event.
+export function maybeIsolateSnapshot(
+	store: ReplayStore,
+	ctx: PluginContext,
+	event: { type: number },
+	now: number,
+): { didIsolate: boolean } {
+	if (event.type !== RRWEB_EVENT_TYPE_FULL_SNAPSHOT) return { didIsolate: false }
+	if (now - store.lastSnapshotFlushAt < SNAPSHOT_ISOLATION_MIN_GAP_MS) {
+		return { didIsolate: false }
+	}
+	if (store.pendingEvents.length > 0) {
+		scheduleChunkUpload(store, ctx)
+	}
+	store.lastSnapshotFlushAt = now
+	return { didIsolate: true }
+}
+
 function scheduleChunkUpload(store: ReplayStore, ctx: PluginContext): void {
 	if (!store.sessionReplayId) return
 	if (store.pendingEvents.length === 0) return
@@ -522,24 +564,13 @@ function startRecording(store: ReplayStore, ctx: PluginContext): void {
 				emit: event => {
 					if (store.stopped || store.cancelled) return
 					if (store.recordingStartedAt === null) store.recordingStartedAt = event.timestamp
-					// FullSnapshot isolation: the snapshot is the playback anchor
-					// for every subsequent incremental event. If a chunk crosses
-					// the 4MB gzipped hard cap, it's dropped wholesale, taking
-					// the anchor with it and breaking playback for up to a full
-					// checkoutEveryMs window, not just the chunk's own duration.
-					// Mitigate by flushing the pre-snapshot buffer separately so
-					// the snapshot lands in a near-empty chunk. Rate-limit to
-					// avoid flush storms on SPA route-change snapshot bursts.
-					if (event.type === RRWEB_EVENT_TYPE_FULL_SNAPSHOT) {
-						const now = Date.now()
-						if (
-							store.pendingEvents.length > 0 &&
-							now - store.lastSnapshotFlushAt >= SNAPSHOT_ISOLATION_MIN_GAP_MS
-						) {
-							scheduleChunkUpload(store, ctx)
-							store.lastSnapshotFlushAt = now
-						}
-					}
+					// FullSnapshot isolation: ship the snapshot in a near-empty
+					// chunk so the 4MB hard cap can't drop the playback anchor.
+					// `maybeIsolateSnapshot` handles the pre-flush + rate-limit;
+					// we do the post-flush below so the snapshot ships solo
+					// instead of inheriting up to chunkSeconds of trailing
+					// incrementals. See the helper's doc comment for details.
+					const { didIsolate } = maybeIsolateSnapshot(store, ctx, event, Date.now())
 					store.pendingEvents.push(event)
 					// Hot path: rrweb fires hundreds of events/sec on busy SPAs.
 					// JSON.stringify-per-event burns CPU we don't have, and .length
@@ -550,7 +581,12 @@ function startRecording(store: ReplayStore, ctx: PluginContext): void {
 					store.pendingBytes += estimateEventBytes(event)
 					if (store.pendingFirstTs === null) store.pendingFirstTs = event.timestamp
 					store.pendingLastTs = event.timestamp
-					if (
+					if (didIsolate) {
+						// Post-flush: the snapshot we just pushed ships in its
+						// own chunk so it doesn't inherit the next chunkSeconds
+						// of incremental mutations and risk crossing the 4MB cap.
+						scheduleChunkUpload(store, ctx)
+					} else if (
 						store.pendingEvents.length >= store.options.chunkMaxEvents ||
 						store.pendingBytes >= store.options.chunkMaxBytes
 					) {
@@ -801,6 +837,9 @@ export const __test__ = {
 	createSession,
 	joinUrl,
 	scheduleChunkUpload,
+	maybeIsolateSnapshot,
+	RRWEB_EVENT_TYPE_FULL_SNAPSHOT,
+	SNAPSHOT_ISOLATION_MIN_GAP_MS,
 	HARD_CHUNK_BYTE_CAP,
 	SDK_SESSION_STORAGE_KEY,
 	MAX_PENDING_UPLOADS,

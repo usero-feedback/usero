@@ -18,6 +18,9 @@ const {
 	uploadChunk,
 	createSession,
 	scheduleChunkUpload,
+	maybeIsolateSnapshot,
+	RRWEB_EVENT_TYPE_FULL_SNAPSHOT,
+	SNAPSHOT_ISOLATION_MIN_GAP_MS,
 	HARD_CHUNK_BYTE_CAP,
 	SDK_SESSION_STORAGE_KEY,
 	MAX_PENDING_UPLOADS,
@@ -409,6 +412,145 @@ test('scheduleChunkUpload: successful upload clears droppedSinceLastUpload and s
 	await store.uploadQueue
 	assert.equal(store.droppedSinceLastUpload, 0)
 	assert.equal(calls[0].init.headers['X-Usero-Dropped-Before'], '3')
+})
+
+// ---- maybeIsolateSnapshot ----
+
+const NON_SNAPSHOT_EVENT = { type: 3 }
+const SNAPSHOT_EVENT = { type: RRWEB_EVENT_TYPE_FULL_SNAPSHOT }
+
+test('maybeIsolateSnapshot: non-snapshot event is a no-op', () => {
+	const store = makeStore({
+		pendingEvents: [{ type: 3, data: {}, timestamp: 1 }],
+		pendingBytes: 10,
+		pendingFirstTs: 1,
+		pendingLastTs: 1,
+		lastSnapshotFlushAt: 0,
+	})
+	const { ctx } = makeCtx()
+	const result = maybeIsolateSnapshot(store, ctx, NON_SNAPSHOT_EVENT, 10_000)
+	assert.equal(result.didIsolate, false)
+	assert.equal(store.lastSnapshotFlushAt, 0, 'watermark untouched for non-snapshot')
+	assert.equal(store.nextChunkSeq, 0, 'no pre-flush queued')
+	assert.equal(store.pendingEvents.length, 1, 'buffer untouched')
+})
+
+test('maybeIsolateSnapshot: first snapshot with empty buffer skips pre-flush but still isolates', () => {
+	const store = makeStore({ lastSnapshotFlushAt: 0 })
+	const { ctx } = makeCtx()
+	const result = maybeIsolateSnapshot(store, ctx, SNAPSHOT_EVENT, 10_000)
+	// Gate trivially open (10_000 - 0 >> 1500), buffer empty so no pre-flush
+	// fires, but didIsolate is true so caller will post-flush after pushing
+	// the snapshot. Watermark advances.
+	assert.equal(result.didIsolate, true)
+	assert.equal(store.lastSnapshotFlushAt, 10_000)
+	assert.equal(store.nextChunkSeq, 0, 'pre-flush skipped because buffer was empty')
+})
+
+test('maybeIsolateSnapshot: snapshot with non-empty buffer fires pre-flush and isolates', () => {
+	const store = makeStore({
+		pendingEvents: [{ type: 3, data: {}, timestamp: 1 }],
+		pendingBytes: 256,
+		pendingFirstTs: 1,
+		pendingLastTs: 2,
+		lastSnapshotFlushAt: 0,
+	})
+	const { ctx } = makeCtx()
+	const result = maybeIsolateSnapshot(store, ctx, SNAPSHOT_EVENT, 10_000)
+	assert.equal(result.didIsolate, true)
+	assert.equal(store.lastSnapshotFlushAt, 10_000)
+	assert.equal(store.nextChunkSeq, 1, 'pre-flush queued one chunk')
+	assert.equal(store.pendingEvents.length, 0, 'pre-flush cleared the buffer')
+})
+
+test('maybeIsolateSnapshot: second snapshot within the rate-limit window is gated', () => {
+	const store = makeStore({
+		pendingEvents: [{ type: 3, data: {}, timestamp: 1 }],
+		pendingBytes: 256,
+		pendingFirstTs: 1,
+		pendingLastTs: 2,
+		lastSnapshotFlushAt: 9_000,
+	})
+	const { ctx } = makeCtx()
+	const result = maybeIsolateSnapshot(
+		store,
+		ctx,
+		SNAPSHOT_EVENT,
+		9_000 + SNAPSHOT_ISOLATION_MIN_GAP_MS - 1,
+	)
+	assert.equal(result.didIsolate, false)
+	assert.equal(store.lastSnapshotFlushAt, 9_000, 'watermark unchanged inside gap window')
+	assert.equal(store.nextChunkSeq, 0, 'no pre-flush inside gap window')
+	assert.equal(store.pendingEvents.length, 1, 'buffer untouched inside gap window')
+})
+
+test('maybeIsolateSnapshot: snapshot exactly at the rate-limit boundary opens the gate', () => {
+	const store = makeStore({
+		pendingEvents: [{ type: 3, data: {}, timestamp: 1 }],
+		pendingBytes: 256,
+		pendingFirstTs: 1,
+		pendingLastTs: 2,
+		lastSnapshotFlushAt: 9_000,
+	})
+	const { ctx } = makeCtx()
+	const now = 9_000 + SNAPSHOT_ISOLATION_MIN_GAP_MS
+	const result = maybeIsolateSnapshot(store, ctx, SNAPSHOT_EVENT, now)
+	assert.equal(result.didIsolate, true)
+	assert.equal(store.lastSnapshotFlushAt, now)
+	assert.equal(store.nextChunkSeq, 1, 'pre-flush fired')
+})
+
+test('maybeIsolateSnapshot: very first emit is a snapshot (rrweb default) ships solo', () => {
+	// Simulates the first event ever: empty buffer, lastSnapshotFlushAt=0.
+	// Gate trivially open, no pre-flush (nothing to flush), caller pushes the
+	// snapshot, post-flush will then upload just the snapshot.
+	const store = makeStore({ lastSnapshotFlushAt: 0 })
+	const { ctx } = makeCtx()
+	// Real-world `now` is Date.now() in ms since 1970, vastly larger than
+	// SNAPSHOT_ISOLATION_MIN_GAP_MS, so the gate opens trivially.
+	const now = Date.now()
+	const result = maybeIsolateSnapshot(store, ctx, SNAPSHOT_EVENT, now)
+	assert.equal(result.didIsolate, true)
+	assert.equal(store.lastSnapshotFlushAt, now)
+	assert.equal(store.nextChunkSeq, 0, 'no pre-flush, buffer empty')
+})
+
+// Hard-cap counter: force scheduleChunkUpload into the >4MB branch by
+// stubbing globalThis.CompressionStream so gzipBytes returns a Uint8Array
+// larger than HARD_CHUNK_BYTE_CAP without actually allocating 4MB of input.
+test('scheduleChunkUpload: increments droppedSinceLastUpload when gzipped output exceeds 4MB hard cap', async () => {
+	const originalCompressionStream = globalThis.CompressionStream
+	let fetchCalls = 0
+	globalThis.fetch = async () => {
+		fetchCalls += 1
+		return new Response('{"ok":true}', { status: 200 })
+	}
+	// Force the gzip path to return a buffer just over the hard cap. We
+	// can't easily produce a real >4MB gzipped payload from a small input
+	// (gzip compresses well), so we monkey-patch CompressionStream to make
+	// gzipBytes fall through to the uncompressed TextEncoder branch and
+	// feed it a giant string. Cheapest path: temporarily undefine
+	// CompressionStream and pass a >4MB string through scheduleChunkUpload.
+	try {
+		// eslint-disable-next-line no-undef
+		delete globalThis.CompressionStream
+		const big = 'x'.repeat(HARD_CHUNK_BYTE_CAP + 1024)
+		const store = makeStore({
+			pendingEvents: [{ type: 3, data: big, timestamp: 1 }],
+			pendingBytes: HARD_CHUNK_BYTE_CAP + 1024,
+			pendingFirstTs: 1,
+			pendingLastTs: 1,
+		})
+		const { ctx } = makeCtx()
+		scheduleChunkUpload(store, ctx)
+		await store.uploadQueue
+		assert.equal(fetchCalls, 0, 'oversized chunk should not be uploaded')
+		assert.equal(store.droppedSinceLastUpload, 1, 'hard-cap drop should increment counter')
+	} finally {
+		if (originalCompressionStream) {
+			globalThis.CompressionStream = originalCompressionStream
+		}
+	}
 })
 
 // scheduleChunkUpload: resets pendingBytes when buffer is swapped out

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.3
+
+- Session replay: close the remaining FullSnapshot chunk-drop window. v0.5.2 flushed the pre-snapshot buffer so the snapshot didn't inherit the previous up-to-3s of incrementals, but the snapshot chunk could still accumulate up to chunkSeconds of POST-snapshot mutations and cross the 4MB gzipped hard cap. v0.5.3 adds an unconditional post-snapshot flush so the snapshot ships in its own chunk. Pre- and post-flush share a single `lastSnapshotFlushAt` rate-limit window (`SNAPSHOT_ISOLATION_MIN_GAP_MS`) so SPA route-change bursts can't trigger a flush storm. Refactored the emit-handler logic into a top-level testable `maybeIsolateSnapshot(store, ctx, event, now)` helper, with unit tests covering the non-snapshot no-op, empty-buffer first-snapshot, populated-buffer pre-flush, rate-limit gating, boundary case, and the >4MB hard-cap drop counter.
+
 ## 0.5.2
 
 - Session replay: isolate rrweb FullSnapshot events into their own chunk so the 4MB-gzipped hard cap can't drop the playback anchor. When a FullSnapshot (rrweb event type 2) arrives, the pre-snapshot pending buffer is flushed first so the snapshot lands in a near-empty chunk, dramatically reducing the chance of a combined chunk crossing the cap and taking the anchor (and the following minute of playback) with it. Rate-limited to one isolation flush per 1500ms to prevent flush storms on SPA route-change snapshot bursts.
