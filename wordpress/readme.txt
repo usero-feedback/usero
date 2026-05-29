@@ -4,7 +4,7 @@ Tags: feedback, feature-requests, roadmap, bug-tracker, widget
 Requires at least: 5.8
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 1.0.2
+Stable tag: 1.0.3
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -92,6 +92,9 @@ This service is provided by Usero, Inc.:
 
 == Changelog ==
 
+= 1.0.3 =
+* Rewrite the Pro tab feature list to accurately describe what Pro includes. Removed the "Powered by Usero badge" line (the plugin does not inject any front-end attribution) and trimmed integrations to those actually shipped.
+
 = 1.0.2 =
 * Bundle the @usero/sdk widget runtime inside the plugin instead of loading it from a third-party CDN, per Plugin Check guidance.
 * Escape all dynamic URL output in the settings screen (`esc_url` on href attributes).
@@ -107,6 +110,9 @@ This service is provided by Usero, Inc.:
 * First release.
 
 == Upgrade Notice ==
+
+= 1.0.3 =
+Removes a misleading "Powered by Usero badge" line from the Pro tab. No functional changes.
 
 = 1.0.2 =
 Bundles the widget runtime in-plugin so installs no longer load a third-party CDN. Recommended for all users.

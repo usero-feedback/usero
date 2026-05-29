@@ -511,11 +511,11 @@ class Usero_Settings {
 		<h2>Pro</h2>
 		<p>Pro is $29/month flat. Not per visitor, not per tracked user. Includes:</p>
 		<ul style="list-style: disc; padding-left: 1.4em;">
-			<li>Remove the "Powered by Usero" badge</li>
+			<li>Higher monthly cap on AI-drafted pull requests</li>
 			<li>Custom domain for your public roadmap</li>
-			<li>AI clustering of duplicate feedback</li>
-			<li>AI-drafted pull requests against your repo</li>
-			<li>Slack, Linear, Jira, Intercom, Zendesk integrations</li>
+			<li>Slack and email integrations</li>
+			<li>Priority support</li>
+			<li>14-day free trial</li>
 		</ul>
 		<p>
 			<a class="button button-primary" href="<?php echo esc_url( trailingslashit( USERO_API_BASE ) . 'pricing' ); ?>" target="_blank" rel="noopener">Upgrade on usero.io</a>
