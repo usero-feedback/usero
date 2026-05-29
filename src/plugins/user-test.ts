@@ -62,6 +62,8 @@ interface MutedSegment {
 interface InFlightNote {
 	atMs: number
 	text: string
+	acked: boolean
+	serverId?: string
 }
 
 interface RecorderStore {
@@ -90,12 +92,15 @@ interface RecorderStore {
 	mutedSinceMs: number | null
 	mutedSegments: MutedSegment[]
 	muteToastShown: boolean
+	muteToastTimers: number[]
 	// In-flight notes
 	notes: InFlightNote[]
 	notesPopoverOpen: boolean
 	notePopoverAtMs: number | null
 	// End-of-test comment (collected on thanks screen)
 	endNote: string
+	// Re-entry guard for finishFlow.
+	finishFlowRan: boolean
 }
 
 const DEFAULT_OPTIONS: Required<Omit<UserTestOptions, 'testerName' | 'apiUrl'>> & {
@@ -793,10 +798,15 @@ function showMuteToast(store: RecorderStore): void {
 	toast.setAttribute('role', 'status')
 	toast.innerHTML = `<strong>Mic off.</strong> Screen is still recording. Tap to unmute.`
 	slot.appendChild(toast)
-	window.setTimeout(() => {
+	const outer = window.setTimeout(() => {
+		if (!toast.isConnected) return
 		toast.setAttribute('data-leaving', 'true')
-		window.setTimeout(() => { toast.remove() }, 260)
+		const inner = window.setTimeout(() => {
+			if (toast.isConnected) toast.remove()
+		}, 260)
+		store.muteToastTimers.push(inner)
 	}, 3000)
+	store.muteToastTimers.push(outer)
 }
 
 function openNotePopover(store: RecorderStore, onSave: (text: string) => void, onCancel: () => void): void {
@@ -939,6 +949,19 @@ function showThanksScreen(
 		card.appendChild(sent)
 	}
 
+	const ERROR_CLASS = 'end-error'
+	const showError = (message: string): void => {
+		// Remove any prior error so we don't stack them on repeated retries.
+		const prior = form.querySelector(`.${ERROR_CLASS}`)
+		if (prior) prior.remove()
+		const err = document.createElement('p')
+		err.className = ERROR_CLASS
+		err.textContent = message
+		err.setAttribute('role', 'alert')
+		err.style.cssText = 'margin:10px 0 0;font-size:12.5px;color:#b91c1c;text-align:center;'
+		form.appendChild(err)
+	}
+
 	const submit = async (): Promise<void> => {
 		const text = ta.value.trim()
 		ta.disabled = true
@@ -946,8 +969,23 @@ function showThanksScreen(
 		const submitBtn = form.querySelector<HTMLButtonElement>('button.primary')
 		if (submitBtn) submitBtn.disabled = true
 		if (text) {
-			await opts.onSubmitNote(text)
-			swapToSent('Thanks. You can close this tab.')
+			try {
+				// 30s timeout. fetch can hang on flaky networks; we don't want
+				// the user staring at a disabled form forever.
+				await Promise.race([
+					Promise.resolve(opts.onSubmitNote(text)),
+					new Promise<never>((_, reject) => {
+						window.setTimeout(() => reject(new Error('timeout')), 30000)
+					}),
+				])
+				swapToSent('Thanks. You can close this tab.')
+			} catch {
+				// Re-enable inputs so the user can retry. No emdashes in copy.
+				ta.disabled = false
+				skipBtn.disabled = false
+				if (submitBtn) submitBtn.disabled = false
+				showError("Couldn't save your note. Try again?")
+			}
 		} else {
 			opts.onSkip()
 			swapToSent('All good. You can close this tab.')
@@ -997,11 +1035,16 @@ async function createSession(
 	}
 }
 
+interface FinaliseNote {
+	atMs: number
+	text: string
+}
+
 async function finaliseSession(
 	apiUrl: string,
 	sessionId: string,
 	durationSeconds: number,
-	extras: { mutedSegments?: MutedSegment[]; endNote?: string | null } = {},
+	extras: { mutedSegments?: MutedSegment[]; endNote?: string | null; notes?: FinaliseNote[] } = {},
 ): Promise<boolean> {
 	try {
 		const body: Record<string, unknown> = {
@@ -1012,6 +1055,13 @@ async function finaliseSession(
 		}
 		const trimmedEndNote = extras.endNote?.trim()
 		if (trimmedEndNote) body.endNote = trimmedEndNote
+		if (extras.notes && extras.notes.length > 0) {
+			// Server caps at 200; trim defensively here too.
+			body.notes = extras.notes.slice(0, 200).map(n => ({
+				atMs: Math.max(0, Math.round(n.atMs)),
+				text: n.text,
+			}))
+		}
 		const res = await fetch(`${apiUrl.replace(/\/$/, '')}/api/user-test-sessions/${encodeURIComponent(sessionId)}/finalise`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
@@ -1024,13 +1074,19 @@ async function finaliseSession(
 	}
 }
 
-async function postNote(
+interface PostNoteResult {
+	ok: boolean
+	id?: string
+	transient: boolean // true on network error / 5xx — eligible for retry
+}
+
+async function postNoteOnce(
 	apiUrl: string,
 	sessionId: string,
 	atMs: number,
 	text: string,
 	logger: PluginContext['logger'],
-): Promise<boolean> {
+): Promise<PostNoteResult> {
 	try {
 		const res = await fetch(`${apiUrl.replace(/\/$/, '')}/api/user-test-sessions/${encodeURIComponent(sessionId)}/notes`, {
 			method: 'POST',
@@ -1040,13 +1096,34 @@ async function postNote(
 		})
 		if (!res.ok) {
 			logger.warn(`note POST rejected with ${res.status}`)
-			return false
+			return { ok: false, transient: res.status >= 500 || res.status === 408 || res.status === 429 }
 		}
-		return true
+		// Best-effort id extraction; failures here don't matter for ack.
+		let id: string | undefined
+		try {
+			const json = (await res.json()) as { id?: unknown }
+			if (typeof json.id === 'string') id = json.id
+		} catch { /* ignore */ }
+		return { ok: true, id, transient: false }
 	} catch (err) {
 		logger.warn('note POST failed', err)
-		return false
+		return { ok: false, transient: true }
 	}
+}
+
+// One immediate retry on transient errors. If still failing, defer to
+// finalise batching via the un-acked notes channel.
+async function postNoteWithRetry(
+	apiUrl: string,
+	sessionId: string,
+	atMs: number,
+	text: string,
+	logger: PluginContext['logger'],
+): Promise<PostNoteResult> {
+	const first = await postNoteOnce(apiUrl, sessionId, atMs, text, logger)
+	if (first.ok || !first.transient) return first
+	await new Promise(resolve => setTimeout(resolve, 400 + Math.floor(Math.random() * 200)))
+	return postNoteOnce(apiUrl, sessionId, atMs, text, logger)
 }
 
 
@@ -1184,7 +1261,12 @@ function stopRecording(store: RecorderStore): void {
 
 async function finishFlow(store: RecorderStore, ctx: PluginContext, opts: { showThanks: boolean }): Promise<void> {
 	if (store.cancelled) return
+	// Short-circuit re-entry. The pagehide handler and the manual Finish click
+	// can race; server is also idempotent on a second finalise call, but doing
+	// the local work twice (flushing mute, draining queues, etc.) is wasted.
+	if (store.finishFlowRan) return
 	if (store.indicatorState === 'finishing' || store.indicatorState === 'done') return
+	store.finishFlowRan = true
 	store.indicatorState = 'finishing'
 	flushMuteIfActive(store)
 	renderIndicatorState(store)
@@ -1197,12 +1279,21 @@ async function finishFlow(store: RecorderStore, ctx: PluginContext, opts: { show
 
 	const durationSeconds = (Date.now() - store.startedAt) / 1000
 	if (store.sessionId) {
-		// First finalise carries durationSeconds + mutedSegments. End-of-test
-		// note (if any) is sent via a second finalise call from the thanks
-		// screen so the participant can compose it after the network round-trip.
+		// First finalise carries durationSeconds + mutedSegments + any un-acked
+		// notes (recovery channel). End-of-test note is sent via a second
+		// finalise call from the thanks screen.
+		const unackedNotes = store.notes.filter(n => !n.acked).map(n => ({ atMs: n.atMs, text: n.text }))
 		const ok = await finaliseSession(store.options.apiUrl, store.sessionId, durationSeconds, {
 			mutedSegments: store.mutedSegments,
+			notes: unackedNotes,
 		})
+		if (ok) {
+			// Mark the un-acked notes we just shipped as acked so the second
+			// finalise call doesn't resend them.
+			for (const n of store.notes) {
+				if (!n.acked) n.acked = true
+			}
+		}
 		store.indicatorState = ok ? 'done' : 'error'
 	} else {
 		store.indicatorState = 'error'
@@ -1214,10 +1305,19 @@ async function finishFlow(store: RecorderStore, ctx: PluginContext, opts: { show
 			onSubmitNote: async text => {
 				if (!store.sessionId) return
 				store.endNote = text
-				await finaliseSession(store.options.apiUrl, store.sessionId, durationSeconds, {
-					mutedSegments: store.mutedSegments,
+				// Second finalise only carries the late-binding fields. mutedSegments
+				// already landed on call 1, server stores idempotently, no need to
+				// resend. Include any notes that arrived (or failed to ack) between
+				// the two calls.
+				const stillUnacked = store.notes.filter(n => !n.acked).map(n => ({ atMs: n.atMs, text: n.text }))
+				const ok = await finaliseSession(store.options.apiUrl, store.sessionId, durationSeconds, {
 					endNote: text,
+					notes: stillUnacked,
 				})
+				if (!ok) throw new Error('finalise failed')
+				for (const n of store.notes) {
+					if (!n.acked) n.acked = true
+				}
 			},
 			onSkip: () => { /* nothing to send */ },
 		})
@@ -1266,10 +1366,12 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				mutedSinceMs: null,
 				mutedSegments: [],
 				muteToastShown: false,
+				muteToastTimers: [],
 				notes: [],
 				notesPopoverOpen: false,
 				notePopoverAtMs: null,
 				endNote: '',
+				finishFlowRan: false,
 			}
 			ctx.setStore(store)
 
@@ -1301,15 +1403,23 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 					store,
 					text => {
 						const atMs = store.notePopoverAtMs ?? Math.max(0, Date.now() - store.startedAt)
-						store.notes.push({ atMs, text })
+						const note: InFlightNote = { atMs, text, acked: false }
+						store.notes.push(note)
 						closeNote()
 						renderNotesCount(store)
-						// Fire-and-forget; UI never blocks on the POST. Failures
-						// surface as a warning in logs, the note is also captured
-						// in-memory and will go out in finalise via mutedSegments-
-						// style pickup once the server supports batched recovery.
+						// UI never blocks on the POST. On success we mark the note
+						// acked; on failure (after one retry) it stays unacked and
+						// gets included in the finalise notes batch as a recovery
+						// channel. Server dedupes by (sessionId, atMs, text).
 						if (store.sessionId) {
-							void postNote(store.options.apiUrl, store.sessionId, atMs, text, ctx.logger)
+							const sessionId = store.sessionId
+							void (async (): Promise<void> => {
+								const result = await postNoteWithRetry(store.options.apiUrl, sessionId, atMs, text, ctx.logger)
+								if (result.ok) {
+									note.acked = true
+									if (result.id) note.serverId = result.id
+								}
+							})()
 						}
 					},
 					() => closeNote(),
@@ -1402,6 +1512,10 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				document.removeEventListener('keydown', store.keydownHandler)
 				store.keydownHandler = null
 			}
+			for (const id of store.muteToastTimers) {
+				try { window.clearTimeout(id) } catch { /* ignore */ }
+			}
+			store.muteToastTimers = []
 			if (store.indicator && store.indicator.parentNode) {
 				store.indicator.parentNode.removeChild(store.indicator)
 			}
