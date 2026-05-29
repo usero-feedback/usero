@@ -54,6 +54,16 @@ interface UserTestTask {
 	sortOrder: number
 }
 
+interface MutedSegment {
+	startMs: number
+	endMs: number
+}
+
+interface InFlightNote {
+	atMs: number
+	text: string
+}
+
 interface RecorderStore {
 	cancelled: boolean
 	slug: string
@@ -74,6 +84,18 @@ interface RecorderStore {
 	tasksPanelOpen: boolean
 	outsidePointerHandler: ((event: PointerEvent) => void) | null
 	keydownHandler: ((event: KeyboardEvent) => void) | null
+	// Mic mute
+	hasMicPermission: boolean
+	muted: boolean
+	mutedSinceMs: number | null
+	mutedSegments: MutedSegment[]
+	muteToastShown: boolean
+	// In-flight notes
+	notes: InFlightNote[]
+	notesPopoverOpen: boolean
+	notePopoverAtMs: number | null
+	// End-of-test comment (collected on thanks screen)
+	endNote: string
 }
 
 const DEFAULT_OPTIONS: Required<Omit<UserTestOptions, 'testerName' | 'apiUrl'>> & {
@@ -253,11 +275,18 @@ async function uploadChunkWithRetry(
 	return false
 }
 
-function buildIndicator(host: HTMLElement, store: RecorderStore, onFinish: () => void, onToggleTasks: () => void): ShadowRoot {
+interface IndicatorCallbacks {
+	onFinish: () => void
+	onToggleTasks: () => void
+	onToggleMute: () => void
+	onOpenNote: () => void
+}
+
+function buildIndicator(host: HTMLElement, store: RecorderStore, callbacks: IndicatorCallbacks): ShadowRoot {
 	const root = host.attachShadow({ mode: 'closed' })
 	const style = document.createElement('style')
-	// Keep this CSS small. Pulse is the only animation. Bottom-center,
-	// safe-area aware, semi-transparent so it doesn't block the page.
+	// Compact, glassy dark pill. Mic chip is now a real button with three
+	// states (recording / muted / no-mic). Notes button sits beside it.
 	style.textContent = `
 		:host { all: initial; }
 		.anchor {
@@ -270,19 +299,21 @@ function buildIndicator(host: HTMLElement, store: RecorderStore, onFinish: () =>
 			color: #fff;
 		}
 		.bar {
-			display: inline-flex; align-items: center; gap: 10px;
-			padding: 8px 14px 8px 12px;
-			background: rgba(17,17,17,0.78);
+			display: inline-flex; align-items: center; gap: 6px;
+			padding: 6px 8px 6px 6px;
+			background: rgba(17,17,17,0.82);
+			border: 1px solid rgba(255,255,255,0.08);
 			border-radius: 999px;
-			box-shadow: 0 8px 24px rgba(0,0,0,0.18);
-			backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+			box-shadow: 0 8px 24px rgba(0,0,0,0.22);
+			backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
 			max-width: 100%;
 		}
 		.panel {
-			background: rgba(17,17,17,0.88);
+			background: rgba(17,17,17,0.92);
+			border: 1px solid rgba(255,255,255,0.08);
 			border-radius: 14px; padding: 12px 14px 12px 8px;
 			line-height: 1.45;
-			box-shadow: 0 12px 32px rgba(0,0,0,0.28);
+			box-shadow: 0 12px 32px rgba(0,0,0,0.32);
 			max-height: min(60vh, 480px);
 			max-width: min(420px, calc(100vw - 32px));
 			width: max-content; overflow-y: auto;
@@ -291,29 +322,156 @@ function buildIndicator(host: HTMLElement, store: RecorderStore, onFinish: () =>
 		.panel ol { margin: 0; padding-left: 26px; }
 		.panel li { margin: 0 0 8px; }
 		.panel li:last-child { margin: 0; }
+
+		/* Mic chip: pill-within-pill with dot + label, doubles as mute toggle. */
+		.mic {
+			display: inline-flex; align-items: center; gap: 7px;
+			min-height: 32px; min-width: 44px;
+			padding: 0 11px 0 10px;
+			border-radius: 999px;
+			background: rgba(255,255,255,0.06);
+			border: 1px solid rgba(255,255,255,0.06);
+			color: #fff; font: inherit;
+			cursor: pointer; appearance: none;
+			transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+		}
+		.mic:hover { background: rgba(255,255,255,0.12); }
+		.mic:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+		.mic[data-mic-state="muted"] {
+			background: rgba(251, 191, 36, 0.18);
+			border-color: rgba(251, 191, 36, 0.45);
+			color: #fcd34d;
+		}
+		.mic[data-mic-state="muted"]:hover { background: rgba(251, 191, 36, 0.26); }
+		.mic[data-mic-state="none"] {
+			background: rgba(255,255,255,0.04);
+			color: rgba(255,255,255,0.55);
+			cursor: default;
+		}
+		.mic[data-mic-state="none"]:hover { background: rgba(255,255,255,0.04); }
+		.mic-icon { width: 13px; height: 13px; display: inline-block; flex-shrink: 0; }
+		.mic-label { font-weight: 500; letter-spacing: 0.01em; white-space: nowrap; }
+
 		.dot {
-			width: 8px; height: 8px; border-radius: 50%;
+			width: 7px; height: 7px; border-radius: 50%;
 			background: #ef4444;
 			box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6);
 			animation: pulse 1.6s ease-out infinite;
+			flex-shrink: 0;
 		}
 		.dot[data-state="no-audio"] { background: #fbbf24; animation: none; }
 		.dot[data-state="finishing"] { background: #fbbf24; animation: none; }
 		.dot[data-state="done"] { background: #10b981; animation: none; }
 		.dot[data-state="error"] { background: #ef4444; animation: none; }
-		.label { font-weight: 500; letter-spacing: 0.01em; }
-		.spacer { width: 1px; height: 16px; background: rgba(255,255,255,0.18); margin: 0 2px; }
+
 		.btn {
-			appearance: none; border: 0; background: rgba(255,255,255,0.12);
+			appearance: none; border: 0; background: rgba(255,255,255,0.10);
 			color: #fff; font: inherit; font-weight: 600;
-			padding: 6px 12px; border-radius: 999px; cursor: pointer;
-			transition: background 0.15s ease;
+			padding: 6px 12px; min-height: 32px; border-radius: 999px; cursor: pointer;
+			transition: background 0.15s ease, transform 0.06s ease;
+			display: inline-flex; align-items: center; gap: 6px;
 		}
-		.btn:hover { background: rgba(255,255,255,0.22); }
+		.btn:hover { background: rgba(255,255,255,0.20); }
+		.btn:active { transform: scale(0.97); }
 		.btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 		.btn[disabled] { opacity: 0.5; cursor: progress; }
 		.tasks-btn[aria-expanded="true"] { background: rgba(255,255,255,0.24); }
-		@media (max-width: 420px) { .btn { padding: 9px 14px; min-height: 40px; } }
+
+		/* Note button: icon-only, matches mic chip footprint */
+		.note-btn {
+			width: 32px; min-height: 32px; padding: 0;
+			background: rgba(255,255,255,0.06);
+			border: 1px solid rgba(255,255,255,0.06);
+			border-radius: 999px;
+			display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+			color: #fff; font: inherit; cursor: pointer; appearance: none;
+			transition: background 0.15s ease, border-color 0.15s ease, width 0.18s ease;
+			overflow: hidden;
+		}
+		.note-btn:hover { background: rgba(255,255,255,0.14); }
+		.note-btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+		.note-btn[data-has-notes="true"] { width: auto; padding: 0 10px 0 9px; gap: 6px; }
+		.note-btn[aria-expanded="true"] { background: rgba(255,255,255,0.22); border-color: rgba(255,255,255,0.18); }
+		.note-icon { width: 14px; height: 14px; display: inline-block; }
+		.note-count { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+		.spacer { width: 1px; height: 18px; background: rgba(255,255,255,0.14); margin: 0 1px; }
+
+		@media (max-width: 480px) {
+			.bar { gap: 4px; padding: 5px 6px 5px 5px; }
+			.btn { padding: 7px 12px; min-height: 38px; }
+			.mic, .note-btn { min-height: 38px; }
+			.note-btn { width: 38px; }
+			.note-btn[data-has-notes="true"] { width: auto; }
+		}
+
+		/* First-mute helper toast: sits above the pill, auto-dismisses */
+		.toast {
+			background: rgba(17,17,17,0.92);
+			border: 1px solid rgba(251, 191, 36, 0.45);
+			color: #fff;
+			padding: 9px 14px; border-radius: 12px;
+			max-width: min(340px, calc(100vw - 32px));
+			box-shadow: 0 12px 28px rgba(0,0,0,0.28);
+			text-align: center; line-height: 1.4;
+			animation: toast-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+		}
+		.toast[data-leaving="true"] { animation: toast-out 0.24s ease forwards; }
+		.toast strong { color: #fcd34d; font-weight: 600; }
+		@keyframes toast-in {
+			from { opacity: 0; transform: translateY(6px); }
+			to   { opacity: 1; transform: translateY(0); }
+		}
+		@keyframes toast-out {
+			to { opacity: 0; transform: translateY(4px); }
+		}
+
+		/* Notes popover */
+		.note-popover {
+			background: rgba(17,17,17,0.94);
+			border: 1px solid rgba(255,255,255,0.10);
+			border-radius: 14px; padding: 12px;
+			width: min(340px, calc(100vw - 32px));
+			box-shadow: 0 18px 40px rgba(0,0,0,0.36);
+			display: flex; flex-direction: column; gap: 10px;
+			animation: pop-in 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+		}
+		.note-popover[hidden] { display: none; }
+		@keyframes pop-in {
+			from { opacity: 0; transform: translateY(6px) scale(0.98); }
+			to   { opacity: 1; transform: translateY(0) scale(1); }
+		}
+		.note-head {
+			color: rgba(255,255,255,0.7); font-size: 12px;
+			font-weight: 500; letter-spacing: 0.02em;
+		}
+		.note-textarea {
+			width: 100%; box-sizing: border-box;
+			min-height: 80px; resize: vertical;
+			padding: 10px 11px;
+			background: rgba(0,0,0,0.35);
+			border: 1px solid rgba(255,255,255,0.10);
+			border-radius: 10px;
+			color: #fff; font: inherit; font-size: 13.5px;
+			line-height: 1.45;
+			transition: border-color 0.15s ease;
+		}
+		.note-textarea:focus { outline: none; border-color: rgba(255,255,255,0.32); }
+		.note-textarea::placeholder { color: rgba(255,255,255,0.42); }
+		.note-actions {
+			display: flex; align-items: center; justify-content: space-between; gap: 8px;
+		}
+		.note-actions .hint {
+			color: rgba(255,255,255,0.45); font-size: 11px;
+		}
+		.note-actions .group { display: inline-flex; gap: 6px; }
+		.note-actions .btn { padding: 6px 12px; font-size: 12.5px; min-height: 32px; }
+		.btn-primary { background: #fff !important; color: #111; }
+		.btn-primary:hover { background: rgba(255,255,255,0.85) !important; }
+		.btn-ghost { background: transparent; color: rgba(255,255,255,0.7); }
+		.btn-ghost:hover { background: rgba(255,255,255,0.10); color: #fff; }
+
+		/* Thanks overlay + end-of-test note */
 		.thanks {
 			position: fixed; inset: 0;
 			display: grid; place-items: center;
@@ -328,12 +486,14 @@ function buildIndicator(host: HTMLElement, store: RecorderStore, onFinish: () =>
 		}
 		.thanks-card {
 			background: #fff; color: #111;
-			border-radius: 16px; padding: 28px 24px;
-			max-width: 360px; width: 100%;
+			border-radius: 18px; padding: 28px 24px;
+			max-width: 420px; width: 100%;
 			box-shadow: 0 20px 50px rgba(0,0,0,0.25);
+			text-align: left;
 		}
-		.thanks h2 { margin: 0 0 8px; font-size: 20px; }
-		.thanks p { margin: 0; font-size: 14px; line-height: 1.45; color: #4b5563; }
+		.thanks-card .head { text-align: center; }
+		.thanks h2 { margin: 0 0 6px; font-size: 20px; }
+		.thanks .lede { margin: 0 0 18px; font-size: 14px; line-height: 1.45; color: #4b5563; text-align: center; }
 		.thanks .check {
 			width: 44px; height: 44px; border-radius: 50%;
 			background: #10b981; color: #fff;
@@ -341,6 +501,50 @@ function buildIndicator(host: HTMLElement, store: RecorderStore, onFinish: () =>
 			margin: 0 auto 12px;
 			font-size: 22px;
 		}
+		.thanks .end-label {
+			display: block; margin: 0 0 8px;
+			font-size: 13px; font-weight: 500; color: #374151;
+		}
+		.thanks .end-textarea {
+			width: 100%; box-sizing: border-box;
+			min-height: 96px; resize: vertical;
+			padding: 11px 12px;
+			background: #f9fafb;
+			border: 1px solid #e5e7eb;
+			border-radius: 10px;
+			font: inherit; font-size: 14px; line-height: 1.5;
+			color: #111;
+			transition: border-color 0.15s ease, background 0.15s ease;
+		}
+		.thanks .end-textarea:focus {
+			outline: none; border-color: #111; background: #fff;
+		}
+		.thanks .end-textarea::placeholder { color: #9ca3af; }
+		.thanks .end-actions {
+			display: flex; gap: 10px; margin-top: 14px;
+		}
+		.thanks .end-actions button {
+			flex: 1;
+			appearance: none; border: 1px solid #e5e7eb;
+			background: #fff; color: #111;
+			padding: 11px 14px; border-radius: 10px;
+			font: inherit; font-weight: 600; font-size: 14px;
+			cursor: pointer;
+			transition: background 0.15s ease, border-color 0.15s ease;
+		}
+		.thanks .end-actions button:hover { background: #f3f4f6; }
+		.thanks .end-actions button.primary {
+			background: #111; color: #fff; border-color: #111;
+		}
+		.thanks .end-actions button.primary:hover { background: #1f2937; border-color: #1f2937; }
+		.thanks .end-actions button:focus-visible { outline: 2px solid #111; outline-offset: 2px; }
+		.thanks .end-hint {
+			margin: 10px 0 0; font-size: 11.5px; color: #9ca3af; text-align: center;
+		}
+		.thanks .end-sent {
+			margin-top: 14px; text-align: center; color: #4b5563; font-size: 13px;
+		}
+
 		@keyframes pulse {
 			0% { box-shadow: 0 0 0 0 rgba(239,68,68,0.55); }
 			70% { box-shadow: 0 0 0 10px rgba(239,68,68,0); }
@@ -348,6 +552,7 @@ function buildIndicator(host: HTMLElement, store: RecorderStore, onFinish: () =>
 		}
 		@media (prefers-reduced-motion: reduce) {
 			.dot { animation: none; }
+			.toast, .note-popover { animation: none; }
 		}
 	`
 	const anchor = document.createElement('div')
@@ -357,42 +562,85 @@ function buildIndicator(host: HTMLElement, store: RecorderStore, onFinish: () =>
 	panel.className = 'panel'
 	panel.hidden = true
 
+	// Toast slot: helper messages render here above the bar.
+	const toastSlot = document.createElement('div')
+	toastSlot.className = 'toast-slot'
+
+	// Notes popover slot: rendered above the bar when open.
+	const notePopover = document.createElement('div')
+	notePopover.className = 'note-popover'
+	notePopover.hidden = true
+
 	const bar = document.createElement('div')
 	bar.className = 'bar'
 	bar.setAttribute('role', 'status')
 	bar.setAttribute('aria-live', 'polite')
 
+	// Mic chip = real button. Three states driven by data-mic-state.
+	const micBtn = document.createElement('button')
+	micBtn.type = 'button'
+	micBtn.className = 'mic'
+	micBtn.setAttribute('data-mic-state', 'recording')
+	micBtn.setAttribute('aria-pressed', 'false')
+	micBtn.setAttribute('aria-label', 'Mute microphone')
+
 	const dot = document.createElement('span')
 	dot.className = 'dot'
 	dot.setAttribute('data-state', store.indicatorState)
 
-	const label = document.createElement('span')
-	label.className = 'label'
-	label.textContent = 'Recording'
+	const micIcon = document.createElement('span')
+	micIcon.className = 'mic-icon'
+	micIcon.innerHTML = MIC_ICON_SVG
+	micIcon.setAttribute('aria-hidden', 'true')
+
+	const micLabel = document.createElement('span')
+	micLabel.className = 'mic-label'
+	micLabel.textContent = 'Recording'
+
+	micBtn.appendChild(dot)
+	micBtn.appendChild(micIcon)
+	micBtn.appendChild(micLabel)
+	micBtn.addEventListener('click', callbacks.onToggleMute)
+	bar.appendChild(micBtn)
+
+	// Notes button: icon-only by default, grows to show count once notes exist.
+	const noteBtn = document.createElement('button')
+	noteBtn.type = 'button'
+	noteBtn.className = 'note-btn'
+	noteBtn.setAttribute('aria-label', 'Add a timestamped note')
+	noteBtn.setAttribute('aria-expanded', 'false')
+	noteBtn.setAttribute('data-has-notes', 'false')
+	noteBtn.innerHTML = `<span class="note-icon" aria-hidden="true">${NOTE_ICON_SVG}</span><span class="note-count" hidden></span>`
+	noteBtn.addEventListener('click', callbacks.onOpenNote)
+	bar.appendChild(noteBtn)
 
 	const spacer = document.createElement('span')
 	spacer.className = 'spacer'
-
-	bar.appendChild(dot)
-	bar.appendChild(label)
 	bar.appendChild(spacer)
 
 	const btn = document.createElement('button')
 	btn.type = 'button'
 	btn.className = 'btn finish-btn'
 	btn.textContent = 'Finish'
-	btn.addEventListener('click', onFinish)
+	btn.addEventListener('click', callbacks.onFinish)
 	bar.appendChild(btn)
 
-	if (store.tasks.length > 0) installTasksToggle(bar, btn, store, onToggleTasks)
+	if (store.tasks.length > 0) installTasksToggle(bar, btn, store, callbacks.onToggleTasks)
 
 	anchor.appendChild(panel)
+	anchor.appendChild(toastSlot)
+	anchor.appendChild(notePopover)
 	anchor.appendChild(bar)
 
 	root.appendChild(style)
 	root.appendChild(anchor)
 	return root
 }
+
+// Inline SVGs kept tiny. currentColor so they inherit the chip text color.
+const MIC_ICON_SVG = `<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" width="13" height="13"><path d="M8 1.5a2 2 0 0 0-2 2v4a2 2 0 1 0 4 0v-4a2 2 0 0 0-2-2Z" fill="currentColor"/><path d="M4 7.5a4 4 0 0 0 8 0M8 11.5v3M5.5 14.5h5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`
+const MIC_MUTED_ICON_SVG = `<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" width="13" height="13"><path d="M8 1.5a2 2 0 0 0-2 2v3.2L10 11V3.5a2 2 0 0 0-2-2Z" fill="currentColor"/><path d="M4 7.5a4 4 0 0 0 6.5 3.12M12 7.5a4 4 0 0 1-.3 1.5M8 11.5v3M5.5 14.5h5M2 2l12 12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`
+const NOTE_ICON_SVG = `<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" width="14" height="14"><path d="M3 3.5A1.5 1.5 0 0 1 4.5 2h7A1.5 1.5 0 0 1 13 3.5V10a1.5 1.5 0 0 1-1.5 1.5H7L4 14v-2.5h-.5A1.5 1.5 0 0 1 2 10V3.5A1.5 1.5 0 0 1 3.5 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`
 
 function installTasksToggle(bar: HTMLElement, finishBtn: HTMLElement, store: RecorderStore, onToggleTasks: () => void): void {
 	const tasksBtn = document.createElement('button')
@@ -433,54 +681,289 @@ function writeTasksPanelOpen(open: boolean): void {
 	try { window.sessionStorage?.setItem(TASKS_PANEL_OPEN_STORAGE_KEY, open ? '1' : '0') } catch { /* ignore */ }
 }
 
+function micChipState(store: RecorderStore): 'recording' | 'muted' | 'none' | 'inactive' {
+	if (store.indicatorState === 'finishing' || store.indicatorState === 'done' || store.indicatorState === 'error') {
+		return 'inactive'
+	}
+	if (!store.hasMicPermission) return 'none'
+	return store.muted ? 'muted' : 'recording'
+}
+
 function renderIndicatorState(store: RecorderStore): void {
 	const root = store.indicatorRoot
 	if (!root) return
 	const dot = root.querySelector('.dot')
-	const label = root.querySelector('.label')
+	const mic = root.querySelector<HTMLButtonElement>('.mic')
+	const micIcon = root.querySelector('.mic-icon')
+	const micLabel = root.querySelector('.mic-label')
 	const btn = root.querySelector<HTMLButtonElement>('.finish-btn')
-	if (!(dot instanceof HTMLElement) || !(label instanceof HTMLElement) || !btn) return
+	if (!(dot instanceof HTMLElement) || !mic || !(micIcon instanceof HTMLElement) || !(micLabel instanceof HTMLElement) || !btn) return
+
 	dot.setAttribute('data-state', store.indicatorState)
+	const chipState = micChipState(store)
+	mic.setAttribute('data-mic-state', chipState === 'inactive' ? 'none' : chipState)
+
+	// Finish-button copy is driven by the indicatorState (network / lifecycle).
 	switch (store.indicatorState) {
 		case 'recording':
-			label.textContent = 'Recording'
-			btn.textContent = 'Finish'
-			btn.disabled = false
-			break
 		case 'no-audio':
-			label.textContent = 'No mic, replay only'
 			btn.textContent = 'Finish'
 			btn.disabled = false
 			break
 		case 'finishing':
-			label.textContent = 'Saving'
 			btn.textContent = 'Saving'
 			btn.disabled = true
 			break
 		case 'done':
-			label.textContent = 'Saved'
 			btn.textContent = 'Done'
 			btn.disabled = true
 			break
 		case 'error':
-			label.textContent = 'Save failed'
 			btn.textContent = 'Retry'
 			btn.disabled = false
 			break
 	}
+
+	// Mic chip copy + icon. Replay continues in all states; the chip only
+	// describes the audio track.
+	switch (chipState) {
+		case 'recording':
+			micIcon.innerHTML = MIC_ICON_SVG
+			micLabel.textContent = 'Recording'
+			mic.setAttribute('aria-label', 'Mute microphone')
+			mic.setAttribute('aria-pressed', 'false')
+			mic.removeAttribute('tabindex')
+			break
+		case 'muted':
+			micIcon.innerHTML = MIC_MUTED_ICON_SVG
+			micLabel.textContent = 'Muted'
+			mic.setAttribute('aria-label', 'Unmute microphone')
+			mic.setAttribute('aria-pressed', 'true')
+			mic.removeAttribute('tabindex')
+			break
+		case 'none':
+			micIcon.innerHTML = MIC_MUTED_ICON_SVG
+			micLabel.textContent = 'No mic, replay only'
+			mic.setAttribute('aria-label', 'Microphone not granted, replay only')
+			mic.setAttribute('aria-pressed', 'false')
+			mic.setAttribute('tabindex', '-1')
+			break
+		case 'inactive':
+			micIcon.innerHTML = MIC_ICON_SVG
+			micLabel.textContent =
+				store.indicatorState === 'finishing' ? 'Saving' :
+				store.indicatorState === 'done' ? 'Saved' :
+				'Save failed'
+			mic.setAttribute('aria-label', 'Recording stopped')
+			mic.setAttribute('aria-pressed', 'false')
+			mic.setAttribute('tabindex', '-1')
+			break
+	}
 }
 
-function showThanksScreen(root: ShadowRoot): void {
+function renderNotesCount(store: RecorderStore): void {
+	const root = store.indicatorRoot
+	if (!root) return
+	const noteBtn = root.querySelector('.note-btn')
+	const count = root.querySelector('.note-count')
+	if (!(noteBtn instanceof HTMLElement) || !(count instanceof HTMLElement)) return
+	const n = store.notes.length
+	noteBtn.setAttribute('data-has-notes', n > 0 ? 'true' : 'false')
+	if (n > 0) {
+		count.textContent = String(n)
+		count.hidden = false
+		noteBtn.setAttribute('aria-label', `Add a timestamped note (${n} so far)`)
+	} else {
+		count.textContent = ''
+		count.hidden = true
+		noteBtn.setAttribute('aria-label', 'Add a timestamped note')
+	}
+}
+
+function showMuteToast(store: RecorderStore): void {
+	if (store.muteToastShown) return
+	store.muteToastShown = true
+	const root = store.indicatorRoot
+	if (!root) return
+	const slot = root.querySelector('.toast-slot')
+	if (!(slot instanceof HTMLElement)) return
+	slot.innerHTML = ''
+	const toast = document.createElement('div')
+	toast.className = 'toast'
+	toast.setAttribute('role', 'status')
+	toast.innerHTML = `<strong>Mic off.</strong> Screen is still recording. Tap to unmute.`
+	slot.appendChild(toast)
+	window.setTimeout(() => {
+		toast.setAttribute('data-leaving', 'true')
+		window.setTimeout(() => { toast.remove() }, 260)
+	}, 3000)
+}
+
+function openNotePopover(store: RecorderStore, onSave: (text: string) => void, onCancel: () => void): void {
+	const root = store.indicatorRoot
+	if (!root) return
+	const pop = root.querySelector('.note-popover')
+	const noteBtn = root.querySelector('.note-btn')
+	if (!(pop instanceof HTMLElement) || !(noteBtn instanceof HTMLElement)) return
+
+	store.notesPopoverOpen = true
+	store.notePopoverAtMs = Date.now() - store.startedAt
+	noteBtn.setAttribute('aria-expanded', 'true')
+
+	pop.innerHTML = ''
+	const head = document.createElement('div')
+	head.className = 'note-head'
+	head.innerHTML = `<span>Add a note</span>`
+
+	const form = document.createElement('form')
+	form.style.cssText = 'display:flex;flex-direction:column;gap:10px;margin:0;'
+	form.noValidate = true
+
+	const ta = document.createElement('textarea')
+	ta.className = 'note-textarea'
+	ta.placeholder = 'What just happened? Confusing? Surprising? Broken?'
+	ta.rows = 3
+	ta.setAttribute('aria-label', 'Note text')
+
+	const actions = document.createElement('div')
+	actions.className = 'note-actions'
+	const hint = document.createElement('span')
+	hint.className = 'hint'
+	hint.innerHTML = '<kbd style="font-family:inherit">Cmd</kbd>+Enter to save'
+	const group = document.createElement('div')
+	group.className = 'group'
+	const cancelBtn = document.createElement('button')
+	cancelBtn.type = 'button'
+	cancelBtn.className = 'btn btn-ghost'
+	cancelBtn.textContent = 'Cancel'
+	const saveBtn = document.createElement('button')
+	saveBtn.type = 'submit'
+	saveBtn.className = 'btn btn-primary'
+	saveBtn.textContent = 'Save'
+	group.appendChild(cancelBtn)
+	group.appendChild(saveBtn)
+	actions.appendChild(hint)
+	actions.appendChild(group)
+
+	form.appendChild(ta)
+	form.appendChild(actions)
+
+	pop.appendChild(head)
+	pop.appendChild(form)
+	pop.hidden = false
+
+	const submit = (): void => {
+		const text = ta.value.trim()
+		if (!text) { onCancel(); return }
+		onSave(text)
+	}
+	form.addEventListener('submit', e => { e.preventDefault(); submit() })
+	cancelBtn.addEventListener('click', () => onCancel())
+	ta.addEventListener('keydown', e => {
+		if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+			e.preventDefault()
+			submit()
+		} else if (e.key === 'Escape') {
+			e.preventDefault()
+			onCancel()
+		}
+	})
+
+	// Autofocus on next frame so animation can finish without scroll jank.
+	window.requestAnimationFrame(() => { ta.focus({ preventScroll: true }) })
+}
+
+function closeNotePopover(store: RecorderStore): void {
+	const root = store.indicatorRoot
+	if (!root) return
+	const pop = root.querySelector('.note-popover')
+	const noteBtn = root.querySelector('.note-btn')
+	if (pop instanceof HTMLElement) {
+		pop.hidden = true
+		pop.innerHTML = ''
+	}
+	if (noteBtn instanceof HTMLElement) noteBtn.setAttribute('aria-expanded', 'false')
+	store.notesPopoverOpen = false
+	store.notePopoverAtMs = null
+}
+
+function showThanksScreen(
+	root: ShadowRoot,
+	opts: { onSubmitNote: (text: string) => Promise<void> | void; onSkip: () => void },
+): void {
 	const overlay = document.createElement('div')
 	overlay.className = 'thanks'
-	overlay.innerHTML = `
-		<div class="thanks-card">
-			<div class="check" aria-hidden="true">&#10003;</div>
-			<h2>Thanks for testing</h2>
-			<p>Your session was saved. You can close this tab.</p>
-		</div>
+
+	const card = document.createElement('div')
+	card.className = 'thanks-card'
+
+	const head = document.createElement('div')
+	head.className = 'head'
+	head.innerHTML = `
+		<div class="check" aria-hidden="true">&#10003;</div>
+		<h2>Thanks for testing</h2>
+		<p class="lede">Your session was saved. One last thing if you have a moment.</p>
 	`
+
+	const form = document.createElement('form')
+	form.noValidate = true
+	form.innerHTML = `
+		<label class="end-label" for="usero-end-note">Anything you would add?</label>
+		<textarea
+			id="usero-end-note"
+			class="end-textarea"
+			rows="4"
+			placeholder="Confusing bits, things you liked, what you'd change..."
+		></textarea>
+		<div class="end-actions">
+			<button type="button" class="skip">Skip</button>
+			<button type="submit" class="primary">Send</button>
+		</div>
+		<p class="end-hint">Cmd or Ctrl plus Enter to send. Either button is fine.</p>
+	`
+
+	card.appendChild(head)
+	card.appendChild(form)
+	overlay.appendChild(card)
 	root.appendChild(overlay)
+
+	const ta = form.querySelector<HTMLTextAreaElement>('#usero-end-note')
+	const skipBtn = form.querySelector<HTMLButtonElement>('button.skip')
+	if (!ta || !skipBtn) return
+
+	const swapToSent = (message: string): void => {
+		form.remove()
+		const sent = document.createElement('p')
+		sent.className = 'end-sent'
+		sent.textContent = message
+		card.appendChild(sent)
+	}
+
+	const submit = async (): Promise<void> => {
+		const text = ta.value.trim()
+		ta.disabled = true
+		skipBtn.disabled = true
+		const submitBtn = form.querySelector<HTMLButtonElement>('button.primary')
+		if (submitBtn) submitBtn.disabled = true
+		if (text) {
+			await opts.onSubmitNote(text)
+			swapToSent('Thanks. You can close this tab.')
+		} else {
+			opts.onSkip()
+			swapToSent('All good. You can close this tab.')
+		}
+	}
+
+	form.addEventListener('submit', e => { e.preventDefault(); void submit() })
+	skipBtn.addEventListener('click', () => { ta.value = ''; void submit() })
+	ta.addEventListener('keydown', e => {
+		if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+			e.preventDefault()
+			void submit()
+		}
+	})
+
+	window.requestAnimationFrame(() => { ta.focus({ preventScroll: true }) })
 }
 
 function parseTasks(raw: unknown): UserTestTask[] {
@@ -518,12 +1001,21 @@ async function finaliseSession(
 	apiUrl: string,
 	sessionId: string,
 	durationSeconds: number,
+	extras: { mutedSegments?: MutedSegment[]; endNote?: string | null } = {},
 ): Promise<boolean> {
 	try {
+		const body: Record<string, unknown> = {
+			durationSeconds: Math.max(0, Math.round(durationSeconds)),
+		}
+		if (extras.mutedSegments && extras.mutedSegments.length > 0) {
+			body.mutedSegments = extras.mutedSegments
+		}
+		const trimmedEndNote = extras.endNote?.trim()
+		if (trimmedEndNote) body.endNote = trimmedEndNote
 		const res = await fetch(`${apiUrl.replace(/\/$/, '')}/api/user-test-sessions/${encodeURIComponent(sessionId)}/finalise`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ durationSeconds: Math.max(0, Math.round(durationSeconds)) }),
+			body: JSON.stringify(body),
 			keepalive: true,
 		})
 		return res.ok
@@ -531,6 +1023,32 @@ async function finaliseSession(
 		return false
 	}
 }
+
+async function postNote(
+	apiUrl: string,
+	sessionId: string,
+	atMs: number,
+	text: string,
+	logger: PluginContext['logger'],
+): Promise<boolean> {
+	try {
+		const res = await fetch(`${apiUrl.replace(/\/$/, '')}/api/user-test-sessions/${encodeURIComponent(sessionId)}/notes`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ atMs: Math.max(0, Math.round(atMs)), text }),
+			keepalive: true,
+		})
+		if (!res.ok) {
+			logger.warn(`note POST rejected with ${res.status}`)
+			return false
+		}
+		return true
+	} catch (err) {
+		logger.warn('note POST failed', err)
+		return false
+	}
+}
+
 
 async function flushPendingFromIdb(store: RecorderStore, ctx: PluginContext): Promise<void> {
 	if (!store.sessionId) return
@@ -583,6 +1101,7 @@ async function startRecording(store: RecorderStore, ctx: PluginContext): Promise
 		return
 	}
 	store.stream = stream
+	store.hasMicPermission = true
 	const mimeType = pickMimeType()
 	let recorder: MediaRecorder
 	try {
@@ -606,6 +1125,40 @@ async function startRecording(store: RecorderStore, ctx: PluginContext): Promise
 	})
 	// `timeslice` makes the recorder emit a self-contained chunk every N ms.
 	recorder.start(store.options.chunkSeconds * 1000)
+}
+
+function toggleMute(store: RecorderStore): boolean {
+	if (!store.stream || !store.hasMicPermission) return false
+	const tracks = store.stream.getAudioTracks()
+	if (tracks.length === 0) return false
+	const nowMs = Date.now() - store.startedAt
+	if (!store.muted) {
+		// Going muted: disable each audio track. MediaRecorder keeps running;
+		// the disabled track produces silence in the resulting WebM. We do NOT
+		// pause the recorder so the single-stream lifecycle stays simple.
+		for (const t of tracks) t.enabled = false
+		store.muted = true
+		store.mutedSinceMs = nowMs
+	} else {
+		// Coming back: close the muted segment, re-enable.
+		const startMs = store.mutedSinceMs ?? nowMs
+		if (nowMs > startMs) {
+			store.mutedSegments.push({ startMs, endMs: nowMs })
+		}
+		store.mutedSinceMs = null
+		store.muted = false
+		for (const t of tracks) t.enabled = true
+	}
+	return true
+}
+
+function flushMuteIfActive(store: RecorderStore): void {
+	if (!store.muted || store.mutedSinceMs === null) return
+	const nowMs = Date.now() - store.startedAt
+	if (nowMs > store.mutedSinceMs) {
+		store.mutedSegments.push({ startMs: store.mutedSinceMs, endMs: nowMs })
+	}
+	store.mutedSinceMs = null
 }
 
 function stopRecording(store: RecorderStore): void {
@@ -633,6 +1186,7 @@ async function finishFlow(store: RecorderStore, ctx: PluginContext, opts: { show
 	if (store.cancelled) return
 	if (store.indicatorState === 'finishing' || store.indicatorState === 'done') return
 	store.indicatorState = 'finishing'
+	flushMuteIfActive(store)
 	renderIndicatorState(store)
 
 	stopRecording(store)
@@ -643,7 +1197,12 @@ async function finishFlow(store: RecorderStore, ctx: PluginContext, opts: { show
 
 	const durationSeconds = (Date.now() - store.startedAt) / 1000
 	if (store.sessionId) {
-		const ok = await finaliseSession(store.options.apiUrl, store.sessionId, durationSeconds)
+		// First finalise carries durationSeconds + mutedSegments. End-of-test
+		// note (if any) is sent via a second finalise call from the thanks
+		// screen so the participant can compose it after the network round-trip.
+		const ok = await finaliseSession(store.options.apiUrl, store.sessionId, durationSeconds, {
+			mutedSegments: store.mutedSegments,
+		})
 		store.indicatorState = ok ? 'done' : 'error'
 	} else {
 		store.indicatorState = 'error'
@@ -651,7 +1210,17 @@ async function finishFlow(store: RecorderStore, ctx: PluginContext, opts: { show
 	renderIndicatorState(store)
 
 	if (opts.showThanks && store.indicatorRoot && store.indicatorState === 'done') {
-		showThanksScreen(store.indicatorRoot)
+		showThanksScreen(store.indicatorRoot, {
+			onSubmitNote: async text => {
+				if (!store.sessionId) return
+				store.endNote = text
+				await finaliseSession(store.options.apiUrl, store.sessionId, durationSeconds, {
+					mutedSegments: store.mutedSegments,
+					endNote: text,
+				})
+			},
+			onSkip: () => { /* nothing to send */ },
+		})
 	}
 }
 
@@ -692,6 +1261,15 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				tasksPanelOpen: readTasksPanelOpen(),
 				outsidePointerHandler: null,
 				keydownHandler: null,
+				hasMicPermission: false,
+				muted: false,
+				mutedSinceMs: null,
+				mutedSegments: [],
+				muteToastShown: false,
+				notes: [],
+				notesPopoverOpen: false,
+				notePopoverAtMs: null,
+				endNote: '',
 			}
 			ctx.setStore(store)
 
@@ -708,27 +1286,66 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 
 			const onToggleTasks = (): void => setPanelOpen(!store.tasksPanelOpen)
 
+			const onToggleMute = (): void => {
+				if (!store.hasMicPermission) return
+				const ok = toggleMute(store)
+				if (!ok) return
+				if (store.muted) showMuteToast(store)
+				renderIndicatorState(store)
+			}
+
+			const closeNote = (): void => closeNotePopover(store)
+			const onOpenNote = (): void => {
+				if (store.notesPopoverOpen) { closeNote(); return }
+				openNotePopover(
+					store,
+					text => {
+						const atMs = store.notePopoverAtMs ?? Math.max(0, Date.now() - store.startedAt)
+						store.notes.push({ atMs, text })
+						closeNote()
+						renderNotesCount(store)
+						// Fire-and-forget; UI never blocks on the POST. Failures
+						// surface as a warning in logs, the note is also captured
+						// in-memory and will go out in finalise via mutedSegments-
+						// style pickup once the server supports batched recovery.
+						if (store.sessionId) {
+							void postNote(store.options.apiUrl, store.sessionId, atMs, text, ctx.logger)
+						}
+					},
+					() => closeNote(),
+				)
+			}
+
 			if (!merged.hideIndicator) {
 				const host = document.createElement('div')
 				host.setAttribute('data-usero-user-test', 'true')
 				document.body.appendChild(host)
 				store.indicator = host
-				store.indicatorRoot = buildIndicator(host, store, onFinish, onToggleTasks)
+				store.indicatorRoot = buildIndicator(host, store, {
+					onFinish,
+					onToggleTasks,
+					onToggleMute,
+					onOpenNote,
+				})
 				renderIndicatorState(store)
+				renderNotesCount(store)
 			}
 
 			// Outside-click + Escape close the tasks panel. Listen on document
 			// (composedPath checks shadow ancestry so taps on the panel/pill
 			// itself don't dismiss).
 			const outsidePointer = (event: PointerEvent): void => {
-				if (!store.tasksPanelOpen) return
 				const host = store.indicator
 				if (!host) return
 				const path = event.composedPath()
-				if (!path.includes(host)) setPanelOpen(false)
+				if (path.includes(host)) return
+				if (store.tasksPanelOpen) setPanelOpen(false)
+				if (store.notesPopoverOpen) closeNote()
 			}
 			const onKeydown = (event: KeyboardEvent): void => {
-				if (event.key === 'Escape' && store.tasksPanelOpen) setPanelOpen(false)
+				if (event.key !== 'Escape') return
+				if (store.tasksPanelOpen) setPanelOpen(false)
+				if (store.notesPopoverOpen) closeNote()
 			}
 			store.outsidePointerHandler = outsidePointer
 			store.keydownHandler = onKeydown
