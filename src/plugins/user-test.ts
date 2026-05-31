@@ -1080,6 +1080,10 @@ async function finaliseSession(
 				text: n.text,
 			}))
 		}
+		if (extras.sdkSessionId) body.sdkSessionId = extras.sdkSessionId
+		if (typeof extras.replayOffsetMs === 'number') {
+			body.replayOffsetMs = Math.max(0, Math.round(extras.replayOffsetMs))
+		}
 		const res = await fetch(`${apiUrl.replace(/\/$/, '')}/api/user-test-sessions/${encodeURIComponent(sessionId)}/finalise`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
@@ -1514,6 +1518,17 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				}
 				store.sessionId = created.sessionId
 				store.clientId = created.clientId
+				// Capture the replay offset HERE at session start (not at
+				// finalise) so it reflects when the test began relative to the
+				// recording. The replay plugin publishes its start epoch into
+				// the core; we read it via the context. If replay is not active
+				// (plugin not loaded, sampled out, or an older host without the
+				// accessor) we leave it null and the finalise body omits
+				// replayOffsetMs. Anchored to store.startedAt (set when the
+				// recorder store was built, i.e. test start) and clamped >= 0.
+				const replayStartMs = ctx.getReplayStartMs ? ctx.getReplayStartMs() : null
+				store.replayOffsetAtStartMs =
+					replayStartMs === null ? null : Math.max(0, store.startedAt - replayStartMs)
 				store.tasks = created.tasks
 				if (store.tasks.length > 0 && store.indicatorRoot && !merged.hideIndicator) {
 					const bar = store.indicatorRoot.querySelector('.bar')
