@@ -1408,6 +1408,7 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				notePopoverAtMs: null,
 				endNote: '',
 				finishFlowRan: false,
+				replayOffsetAtStartMs: null,
 			}
 			ctx.setStore(store)
 
