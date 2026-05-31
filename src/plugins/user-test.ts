@@ -1307,8 +1307,8 @@ async function finishFlow(store: RecorderStore, ctx: PluginContext, opts: { show
 	// gracefully to absent. Sending it on the second (end-note) finalise too
 	// is harmless: the server stores idempotently.
 	const replayLinkage: { sdkSessionId?: string; replayOffsetMs?: number } = {}
-	const sdkSessionId = ctx.getSdkSessionId ? ctx.getSdkSessionId() : undefined
-	if (sdkSessionId) replayLinkage.sdkSessionId = sdkSessionId
+	const linkageSdkSessionId = ctx.getSdkSessionId ? ctx.getSdkSessionId() : undefined
+	if (linkageSdkSessionId) replayLinkage.sdkSessionId = linkageSdkSessionId
 	if (store.replayOffsetAtStartMs !== null) {
 		replayLinkage.replayOffsetMs = store.replayOffsetAtStartMs
 	}
@@ -1524,8 +1524,9 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				// the core; we read it via the context. If replay is not active
 				// (plugin not loaded, sampled out, or an older host without the
 				// accessor) we leave it null and the finalise body omits
-				// replayOffsetMs. Anchored to store.startedAt (set when the
-				// recorder store was built, i.e. test start) and clamped >= 0.
+				// replayOffsetMs. Anchored to store.startedAt (test start),
+				// clamped >= 0 in case the test starts a hair before the replay
+				// epoch is published.
 				const replayStartMs = ctx.getReplayStartMs ? ctx.getReplayStartMs() : null
 				store.replayOffsetAtStartMs =
 					replayStartMs === null ? null : Math.max(0, store.startedAt - replayStartMs)

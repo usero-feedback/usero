@@ -317,6 +317,14 @@ export function initUseroFeedbackWidget(
 					resolveAndApplyGetUser()
 				}
 			},
+			// Core-owned cross-cutting identity. Every plugin reads the same
+			// source of truth in identity.ts, so user-test and session-replay
+			// agree on the per-tab sdkSessionId without importing each other.
+			getSdkSessionId: () => getOrMintSdkSessionId(),
+			getAnonymousId: () => getOrMintAnonymousId(),
+			getUserId: () => getCurrentUserId(),
+			getReplayStartMs: () => getReplayStartMs(),
+			publishReplayStartMs: (epochMs: number) => publishReplayStartMs(epochMs),
 		}
 		pluginContexts.set(plugin.name, ctx)
 		if (plugin.onInit) {
