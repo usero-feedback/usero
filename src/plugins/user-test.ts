@@ -101,6 +101,12 @@ interface RecorderStore {
 	endNote: string
 	// Re-entry guard for finishFlow.
 	finishFlowRan: boolean
+	// Offset (ms) into the session-replay recording at the moment THIS
+	// user-test session started. Captured once at start (not at finalise)
+	// so it pins the test timeline to the recording timeline. Null when no
+	// replay is active (plugin not loaded, sampled out, or host predates
+	// the core accessor); finalise then omits replayOffsetMs.
+	replayOffsetAtStartMs: number | null
 }
 
 const DEFAULT_OPTIONS: Required<Omit<UserTestOptions, 'testerName' | 'apiUrl'>> & {
@@ -1044,7 +1050,19 @@ async function finaliseSession(
 	apiUrl: string,
 	sessionId: string,
 	durationSeconds: number,
-	extras: { mutedSegments?: MutedSegment[]; endNote?: string | null; notes?: FinaliseNote[] } = {},
+	extras: {
+		mutedSegments?: MutedSegment[]
+		endNote?: string | null
+		notes?: FinaliseNote[]
+		// Replay linkage. sdkSessionId is the primary, always-available key:
+		// the server resolves the SessionReplay by (clientId + sdkSessionId)
+		// and sets UserTestSession.sessionReplayId. replayOffsetMs is the
+		// offset captured at session start, only present when replay was
+		// active. Both optional so older servers tolerate their absence and a
+		// test with no replay still finalises cleanly.
+		sdkSessionId?: string
+		replayOffsetMs?: number
+	} = {},
 ): Promise<boolean> {
 	try {
 		const body: Record<string, unknown> = {
@@ -1278,6 +1296,18 @@ async function finishFlow(store: RecorderStore, ctx: PluginContext, opts: { show
 	await flushPendingFromIdb(store, ctx)
 
 	const durationSeconds = (Date.now() - store.startedAt) / 1000
+	// Replay linkage, computed once and sent on every finalise call for this
+	// session. sdkSessionId is the core-owned per-tab id (the primary key the
+	// server uses to resolve the SessionReplay); replayOffsetMs is the offset
+	// captured at session start, only set when replay was active. Both degrade
+	// gracefully to absent. Sending it on the second (end-note) finalise too
+	// is harmless: the server stores idempotently.
+	const replayLinkage: { sdkSessionId?: string; replayOffsetMs?: number } = {}
+	const sdkSessionId = ctx.getSdkSessionId ? ctx.getSdkSessionId() : undefined
+	if (sdkSessionId) replayLinkage.sdkSessionId = sdkSessionId
+	if (store.replayOffsetAtStartMs !== null) {
+		replayLinkage.replayOffsetMs = store.replayOffsetAtStartMs
+	}
 	if (store.sessionId) {
 		// First finalise carries durationSeconds + mutedSegments + any un-acked
 		// notes (recovery channel). End-of-test note is sent via a second
@@ -1286,6 +1316,7 @@ async function finishFlow(store: RecorderStore, ctx: PluginContext, opts: { show
 		const ok = await finaliseSession(store.options.apiUrl, store.sessionId, durationSeconds, {
 			mutedSegments: store.mutedSegments,
 			notes: unackedNotes,
+			...replayLinkage,
 		})
 		if (ok) {
 			// Mark the un-acked notes we just shipped as acked so the second
@@ -1313,6 +1344,7 @@ async function finishFlow(store: RecorderStore, ctx: PluginContext, opts: { show
 				const ok = await finaliseSession(store.options.apiUrl, store.sessionId, durationSeconds, {
 					endNote: text,
 					notes: stillUnacked,
+					...replayLinkage,
 				})
 				if (!ok) throw new Error('finalise failed')
 				for (const n of store.notes) {

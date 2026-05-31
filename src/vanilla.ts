@@ -11,7 +11,15 @@
 
 import { FeedbackApiClient } from './api'
 import { getGradientEnd } from './colorUtils'
-import { handleLogout as identityHandleLogout, identifyIfChanged } from './identity'
+import {
+	getCurrentUserId,
+	getOrMintAnonymousId,
+	getOrMintSdkSessionId,
+	getReplayStartMs,
+	handleLogout as identityHandleLogout,
+	identifyIfChanged,
+	publishReplayStartMs,
+} from './identity'
 import {
 	createPluginLogger,
 	type PluginContext,

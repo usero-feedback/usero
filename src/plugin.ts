@@ -44,6 +44,31 @@ export interface PluginContext {
 	// dedupe in identity.ts makes repeated calls effectively free when
 	// nothing changed.
 	resolveUser?: () => void
+	// ---- Core-owned cross-cutting identity --------------------------------
+	// These read the single source of truth in identity.ts so every plugin
+	// (replay, user-test, future feedback linkage) sees the SAME ids without
+	// importing each other. All optional so older hosts and test doubles that
+	// predate this surface still satisfy the contract; plugins must tolerate
+	// their absence and fall back gracefully.
+	//
+	// Per-tab session id (sessionStorage `usero:session-replay:sdk-session-id`).
+	// The robust linkage key: the server resolves a SessionReplay by
+	// (clientId + sdkSessionId), so any plugin that wants to point at the
+	// tab's recording sends this.
+	getSdkSessionId?: () => string
+	// Per-browser id (localStorage `usero:anonymous-id`) for cross-session
+	// stitching.
+	getAnonymousId?: () => string
+	// Current resolved external user id, or null before identify / after
+	// logout.
+	getUserId?: () => string | null
+	// Wall-clock epoch (ms) when session-replay started, or null if replay
+	// is not active. Consumers compute an offset into the recording from
+	// this; when null, they degrade (send the sdkSessionId key, omit offset).
+	getReplayStartMs?: () => number | null
+	// Publish the replay recording start epoch into the core so other
+	// plugins can compute offsets. Only the replay plugin should call this.
+	publishReplayStartMs?: (epochMs: number) => void
 }
 
 export interface UseroPlugin {

@@ -14,8 +14,25 @@
 // init read. The hot path (replay chunk flush) never touches localStorage.
 
 const ANON_STORAGE_KEY = 'usero:anonymous-id'
+// Reuse the EXACT key the session-replay plugin has always written
+// (`usero:session-replay:sdk-session-id`) so we adopt per-tab session ids
+// already living in customers' browsers instead of minting a fresh one.
+// Changing this would split a tab's existing replay from its user-test
+// linkage, so it must stay byte-for-byte identical to the replay plugin's
+// historical key.
+const SDK_SESSION_STORAGE_KEY = 'usero:session-replay:sdk-session-id'
 
 let cachedAnonymousId: string | null = null
+let cachedSdkSessionId: string | null = null
+// Last resolved external user id, set by the identify pipeline so any
+// plugin can read the current identity without re-resolving the host's
+// `user` prop. Cleared on logout (anonymousId rotation).
+let currentUserId: string | null = null
+// Wall-clock epoch (ms) when the session-replay recording started, as
+// published by the replay plugin. Lets other plugins (user-test) compute
+// an offset into the recording without importing the replay module. Null
+// until replay actually starts (or if replay is not loaded at all).
+let replayStartMs: number | null = null
 // Fingerprint of the last identify we POSTed. Same SDK instance + same
 // resolved user + same traits = no-op. Cleared on logout (anonymousId
 // rotation).
@@ -64,6 +81,24 @@ function safeWriteLocalStorage(key: string, value: string): void {
 	}
 }
 
+function safeReadSessionStorage(key: string): string | null {
+	if (typeof window === 'undefined') return null
+	try {
+		return window.sessionStorage?.getItem(key) ?? null
+	} catch {
+		return null
+	}
+}
+
+function safeWriteSessionStorage(key: string, value: string): void {
+	if (typeof window === 'undefined') return
+	try {
+		window.sessionStorage?.setItem(key, value)
+	} catch {
+		// Sandboxed iframe / Safari Lockdown / quota. Fall back to memory.
+	}
+}
+
 /**
  * Returns the stable per-browser anonymousId. Reads localStorage at most
  * once per SDK instance. Subsequent calls hit the in-memory cache, so
@@ -98,7 +133,62 @@ export function rotateAnonymousId(): string {
 	cachedAnonymousId = id
 	safeWriteLocalStorage(ANON_STORAGE_KEY, id)
 	lastIdentifyFingerprint = null
+	currentUserId = null
 	return id
+}
+
+/**
+ * Returns the stable per-tab sdkSessionId. Core-owned so every plugin
+ * (replay, user-test, future feedback linkage) reads the SAME id for a
+ * given tab. Reads sessionStorage at most once per SDK instance; later
+ * calls hit the in-memory cache.
+ *
+ * Backward compat: reuses the `usero:sdk-session-id` key the replay
+ * plugin has always written, and the same loose sanity filter, so an
+ * id minted by an older replay-only SDK build is adopted as-is rather
+ * than rotated (which would split a tab's replay from its user-test).
+ */
+export function getOrMintSdkSessionId(): string {
+	if (cachedSdkSessionId) return cachedSdkSessionId
+	const existing = safeReadSessionStorage(SDK_SESSION_STORAGE_KEY)
+	if (existing && /^[a-z0-9-]{8,}$/i.test(existing)) {
+		cachedSdkSessionId = existing
+		return existing
+	}
+	const id = generateRandomId()
+	safeWriteSessionStorage(SDK_SESSION_STORAGE_KEY, id)
+	cachedSdkSessionId = id
+	return id
+}
+
+/**
+ * The current resolved external user id, or null if no identify has
+ * succeeded this session (or after logout). Set by the identify
+ * pipeline; read by plugins that want the current identity without
+ * re-resolving the host's `user` prop.
+ */
+export function getCurrentUserId(): string | null {
+	return currentUserId
+}
+
+/**
+ * Published by the session-replay plugin when its recording starts.
+ * Other plugins read it via `getReplayStartMs()` to compute an offset
+ * into the recording. No-op duplicate publishes keep the first value so
+ * the offset stays anchored to the true recording start.
+ */
+export function publishReplayStartMs(epochMs: number): void {
+	if (replayStartMs === null) replayStartMs = epochMs
+}
+
+/**
+ * The wall-clock epoch (ms) when session-replay started, or null if
+ * replay never started this session (plugin not loaded, or sampled out).
+ * Consumers degrade gracefully when null: ship the sdkSessionId linkage
+ * key anyway and omit the offset.
+ */
+export function getReplayStartMs(): number | null {
+	return replayStartMs
 }
 
 function fingerprintUser(anonymousId: string, user: UseroUser): string {
@@ -132,6 +222,10 @@ export interface IdentifyTransport {
  */
 export async function identifyIfChanged(transport: IdentifyTransport, user: UseroUser): Promise<boolean> {
 	const anonymousId = getOrMintAnonymousId()
+	// Make the resolved id readable by other plugins immediately, even
+	// before the network round-trip resolves. This is the identity the
+	// host just told us about; the POST below is best-effort persistence.
+	currentUserId = user.id
 	const fp = fingerprintUser(anonymousId, user)
 	if (fp === lastIdentifyFingerprint) return false
 
@@ -214,8 +308,12 @@ export function handleLogout(): void {
 // Test hooks (not exported from the package public surface).
 export const __test__ = {
 	ANON_STORAGE_KEY,
+	SDK_SESSION_STORAGE_KEY,
 	resetIdentityState: (): void => {
 		cachedAnonymousId = null
+		cachedSdkSessionId = null
+		currentUserId = null
+		replayStartMs = null
 		lastIdentifyFingerprint = null
 	},
 }

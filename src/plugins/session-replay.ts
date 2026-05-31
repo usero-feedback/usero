@@ -676,7 +676,12 @@ export function sessionReplay(options: SessionReplayOptions = {}): UseroPlugin {
 				ctx.logger.error('session-replay needs an apiUrl (via options or PluginContext)')
 				return
 			}
-			const sdkSessionId = mintSdkSessionId()
+			// Prefer the core-owned per-tab id so user-test and replay share
+			// the SAME sdkSessionId for this tab (the server resolves the
+			// SessionReplay by clientId + sdkSessionId). Fall back to local
+			// minting only when the host predates the core accessor (older
+			// SDK embed); both paths read/write the same sessionStorage key.
+			const sdkSessionId = ctx.getSdkSessionId ? ctx.getSdkSessionId() : mintSdkSessionId()
 			// Mint or read the cross-session anonymousId. Cached in module
 			// scope after the first call, so this stays O(1) on hot paths.
 			const anonymousId = getOrMintAnonymousId()
@@ -753,6 +758,11 @@ export function sessionReplay(options: SessionReplayOptions = {}): UseroPlugin {
 				}
 				store.sessionReplayId = created.sessionReplayId
 				store.recordingStartedAt = Date.now()
+				// Publish the recording start epoch into the core so other
+				// plugins (user-test) can compute their offset into this
+				// recording without importing the replay module. No-op if the
+				// host predates the accessor.
+				ctx.publishReplayStartMs?.(store.recordingStartedAt)
 				startRecording(store, ctx)
 			}
 
