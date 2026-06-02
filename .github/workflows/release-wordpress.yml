@@ -56,12 +56,33 @@ jobs:
             exit 1
           fi
 
+      # The wordpress.org SVN repo only exists once the Plugins Team approves
+      # the submission. While the plugin is still in review there is nothing to
+      # commit to, so guard the deploy: if the repo is missing we skip with a
+      # notice (green build) instead of failing and emailing on every SDK tag.
+      # Also strip the leading "v" from the tag (SVN tag dirs are bare "1.1.5").
+      - name: Resolve version and check wordpress.org repo
+        id: wporg
+        env:
+          SLUG: usero-feedback
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if curl -sfo /dev/null "https://plugins.svn.wordpress.org/${SLUG}/"; then
+            echo "repo_exists=true" >> "$GITHUB_OUTPUT"
+            echo "wordpress.org SVN repo for '${SLUG}' exists, will deploy ${VERSION}."
+          else
+            echo "repo_exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::wordpress.org SVN repo for slug '${SLUG}' does not exist yet (plugin still in review). Skipping deploy."
+          fi
+
       - name: Deploy to wordpress.org
+        if: steps.wporg.outputs.repo_exists == 'true'
         uses: 10up/action-wordpress-plugin-deploy@stable
         env:
           SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
           SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
-          SLUG: usero
+          SLUG: usero-feedback
           BUILD_DIR: ./wordpress
           ASSETS_DIR: ./wordpress/assets
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ steps.wporg.outputs.version }}
