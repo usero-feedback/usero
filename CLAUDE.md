@@ -32,12 +32,7 @@ Verify the publish landed: `npm view @usero/sdk version`.
 
 ## Consumer repos to bump after a release
 
-Consumers of `@usero/sdk` (the canonical widget, includes rrweb session replay):
-
-- `/Users/willy/projects/feedback` (this repo's server; dogfoods its own SDK in the dashboard)
-- `/Users/willy/projects/feedback-reddit-ads`
-
-Re-derive the list when in doubt to avoid drift:
+`@usero/sdk` (the canonical widget, includes rrweb session replay) is dogfooded across MANY of the user's projects, not just `feedback`. As of the last count it was ~18 repos and growing. **There is NO hardcoded consumer list. Do NOT bump "just feedback and feedback-reddit-ads" or any other remembered short list.** Default intent is BUMP EVERY CONSUMER. The grep below is the source of truth, re-run it every release:
 
 ```bash
 cd ~/projects
@@ -45,15 +40,19 @@ grep -rl --include=package.json -E '"@usero/sdk"' . 2>/dev/null \
   | grep -v -E 'node_modules|\.claude/worktrees|/usero/'
 ```
 
-For each consumer:
+Every path it prints has `@usero/sdk` literally in its `package.json` (the grep filters on that exact string), so every one is a real consumer to bump. They are NOT legacy `react-feedback-collector` repos, the grep cannot match those. The fuller policy (why bump everything, don't pause to ask about scope or major bumps) lives in `/Users/willy/projects/feedback/CLAUDE.md` under "Releasing a new widget version, bump consumers". Follow that.
 
-1. `cd` to absolute path. Check `git status --short` is clean of unrelated changes.
-2. Bump `@usero/sdk` range in `package.json` (preserve caret if present).
-3. `npm install`. Verify `node_modules/@usero/sdk/package.json` shows the new version.
-4. Run that repo's `npm run typecheck`.
-5. Commit `Bump @usero/sdk to <version>` (stage `package.json` and `package-lock.json` by path). Push to main.
+For each consumer the grep returns:
 
-The legacy `react-feedback-collector` package is consumed by a separate list of repos (see `/Users/willy/projects/feedback/CLAUDE.md` for the legacy consumer list). Those do NOT get bumped on a `@usero/sdk` release.
+1. `cd` to its absolute path.
+2. Check the branch: `git rev-parse --abbrev-ref HEAD`. SKIP and report if NOT on `main` (the grep also surfaces sibling git worktrees that sit on feature branches, e.g. `feedback-transcript-content-fix`, `groceries-progressive-upload`; only bump+push repos on `main`).
+3. If `package.json` or its lockfile is ALREADY dirty before you touch it, SKIP and report (another session may be mid-bump). Unrelated dirty files are fine, leave them.
+4. Bump the `@usero/sdk` range in `package.json` (preserve caret if present).
+5. Install with the matching package manager (`npm install` / `pnpm install` / `yarn install` per the lockfile present). Verify `node_modules/@usero/sdk/package.json` shows the new version.
+6. Run that repo's `npm run typecheck` if it has one. Some repos carry pre-existing typecheck errors unrelated to the SDK (verify against the baseline dep files if unsure); only block the commit on a NEW failure the bump introduced.
+7. Stage ONLY `package.json` + the matching lockfile by explicit path. Commit `Bump @usero/sdk to <version>`. Push to `main`.
+
+The legacy `react-feedback-collector` package is consumed by a separate list of repos (see `/Users/willy/projects/feedback/CLAUDE.md` for the legacy consumer list). Those do NOT get bumped on a `@usero/sdk` release, and the grep above never matches them anyway.
 
 # Code
 
