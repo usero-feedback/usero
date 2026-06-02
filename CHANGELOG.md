@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.4
+
+Patch. User-test plugin: adopt a server-created session via the `uts` URL param instead of always minting its own. The Usero participant pay flow now creates the UserTestSession on the entry screen (so it carries the tester's email and recording consent from the start) and redirects to the customer site with `&uts=<id>`. When the plugin sees `uts`, it GETs the new `/api/user-test-sessions/:id/adopt` endpoint for the clientId + tasks and records against that existing session, rather than POSTing a fresh one. This prevents the double-session bug (one emailed, one anonymous). Backwards compatible: open tests using the old `?usero_test=<slug>` link with no `uts` still fall back to creating their own session, so older entry pages keep working. A present-but-unresolvable `uts` surfaces the error state rather than silently creating a second anonymous session.
+
 ## 1.1.3
 
 Patch. Fix the feedback widget discarding what you typed while a screenshot uploaded. Adding a screenshot triggered a full panel re-render on upload start and finish, which rebuilt the comment textarea, stole focus and the caret, and wiped any text typed during the upload, so it read as the popup resetting itself mid-typing. Upload state now updates surgically (only the pick button label and the preview/error row), leaving the textarea and your in-progress text untouched. As a guard, an in-flight upload or submit can no longer be dismissed by an accidental backdrop tap or a stray Escape; the explicit close button and floating toggle still close it.

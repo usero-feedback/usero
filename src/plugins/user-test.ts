@@ -145,6 +145,26 @@ function readTesterName(override: string): string | undefined {
 	return undefined
 }
 
+// Read the `uts` (user-test session) id the entry screen appends when it
+// creates the session server-side. When present, the SDK ADOPTS that session
+// instead of minting its own (so the session has the participant's email from
+// creation, no double-session). Absent for open tests using the old link
+// shape, where the SDK falls back to createSession.
+function getAdoptSessionId(): string | null {
+	if (typeof window === 'undefined' || typeof window.location === 'undefined') return null
+	try {
+		const params = new URLSearchParams(window.location.search)
+		const raw = params.get('uts')
+		if (!raw) return null
+		const cleaned = raw.trim().slice(0, 64)
+		// Session ids are cuids: lowercase alphanumerics. Reject anything else.
+		if (!/^[a-z0-9]+$/i.test(cleaned)) return null
+		return cleaned
+	} catch {
+		return null
+	}
+}
+
 function getTestSlug(queryParam: string): string | null {
 	if (typeof window === 'undefined' || typeof window.location === 'undefined') return null
 	try {
@@ -1041,6 +1061,29 @@ async function createSession(
 	}
 }
 
+// Adopt an existing session the entry screen already created (carried via the
+// `uts` URL param). GET the clientId + tasks for it; we do NOT create a new
+// session. Returns null on any failure so the caller can surface the error
+// state (we deliberately do NOT silently fall back to createSession here: a
+// present-but-unresolvable uts means something is wrong, and creating a second
+// anonymous session is exactly the double-session bug we're avoiding).
+async function adoptSession(
+	apiUrl: string,
+	sessionId: string,
+): Promise<{ sessionId: string; clientId: string; tasks: UserTestTask[] } | null> {
+	try {
+		const res = await fetch(`${apiUrl.replace(/\/$/, '')}/api/user-test-sessions/${encodeURIComponent(sessionId)}/adopt`, {
+			method: 'GET',
+		})
+		if (!res.ok) return null
+		const json = (await res.json()) as { sessionId?: unknown; clientId?: unknown; tasks?: unknown }
+		if (typeof json.sessionId !== 'string' || typeof json.clientId !== 'string') return null
+		return { sessionId: json.sessionId, clientId: json.clientId, tasks: parseTasks(json.tasks) }
+	} catch {
+		return null
+	}
+}
+
 interface FinaliseNote {
 	atMs: number
 	text: string
@@ -1509,10 +1552,16 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 			window.addEventListener('pagehide', pageHide)
 
 			void (async (): Promise<void> => {
-				const created = await createSession(apiUrl, slug, readTesterName(merged.testerName))
+				// If the entry screen created the session and passed `uts`, ADOPT
+				// it (the participant's email is already attached server-side).
+				// Otherwise fall back to creating one (open tests / old links).
+				const adoptId = getAdoptSessionId()
+				const created = adoptId
+					? await adoptSession(apiUrl, adoptId)
+					: await createSession(apiUrl, slug, readTesterName(merged.testerName))
 				if (store.cancelled) return
 				if (!created) {
-					ctx.logger.error('failed to create user-test session')
+					ctx.logger.error(adoptId ? 'failed to adopt user-test session' : 'failed to create user-test session')
 					store.indicatorState = 'error'
 					renderIndicatorState(store)
 					return
