@@ -448,22 +448,26 @@ export function initUseroFeedbackWidget(
 		screenshotError = null
 		if (!file.type.startsWith('image/')) {
 			screenshotError = 'Image files only'
-			render()
+			updateUploadExtras()
 			return
 		}
 		if (file.size > MAX_SCREENSHOT_BYTES) {
 			screenshotError = 'Max 10MB'
-			render()
+			updateUploadExtras()
 			return
 		}
 		if (screenshots.length >= MAX_SCREENSHOTS) {
 			screenshotError = `Max ${MAX_SCREENSHOTS} screenshots`
-			render()
+			updateUploadExtras()
 			return
 		}
 
 		isUploadingScreenshot = true
-		render()
+		// Surgical updates only. A full render() here would rebuild the panel
+		// innerHTML and destroy the comment textarea the user may be typing in,
+		// stealing focus + caret + any unsynced keystrokes mid-upload.
+		updateUploadButton()
+		updateUploadExtras()
 		try {
 			const uploaded = await apiClient.uploadScreenshot(file, clientId)
 			screenshots = [...screenshots, uploaded]
@@ -471,13 +475,17 @@ export function initUseroFeedbackWidget(
 			screenshotError = err instanceof Error ? err.message : 'Upload failed'
 		} finally {
 			isUploadingScreenshot = false
-			render()
+			updateUploadButton()
+			updateUploadExtras()
 		}
 	}
 
 	function removeScreenshot(index: number): void {
 		screenshots = screenshots.filter((_, i) => i !== index)
-		render()
+		// Surgical update so removing a screenshot mid-typing does not blow away
+		// the textarea (matches the upload path's no-full-render rule).
+		updateUploadButton()
+		updateUploadExtras()
 	}
 
 	function close(): void {
@@ -485,6 +493,87 @@ export function initUseroFeedbackWidget(
 		isOpen = false
 		onClose?.()
 		render()
+	}
+
+	// Inner HTML of the upload pick button (label, spinner). Built separately
+	// from renderPanel so it can be applied surgically without rebuilding the
+	// panel (and thus the comment textarea) during an upload. The file input is
+	// a sibling of the button inside the toolrow, so it is NOT touched here.
+	function buildUploadButtonInner(): string {
+		return isUploadingScreenshot
+			? '<span class="fb-ups"></span> Uploading...'
+			: '📷 Add screenshot'
+	}
+
+	function buildUploadButtonHtml(): string {
+		const atMax = screenshots.length >= MAX_SCREENSHOTS
+		const btnDisabled = isUploadingScreenshot || atMax
+		return `
+			<input type="file" accept="image/*" data-role="screenshot-input" style="display:none;" aria-label="Choose screenshot" />
+			<button type="button" class="fb-upb ${btnDisabled ? 'fb-upb--dis' : ''}" data-role="screenshot-pick" ${btnDisabled ? 'disabled' : ''} style="border:1px solid ${theme.border};color:${theme.text};">
+				${buildUploadButtonInner()}
+			</button>
+		`
+	}
+
+	function buildUploadExtrasHtml(): string {
+		const atMax = screenshots.length >= MAX_SCREENSHOTS
+		const previewsHtml = screenshots
+			.map(
+				(shot, i) => `
+					<div class="fb-sp">
+						<img src="${escapeHtml(shot.url)}" alt="Screenshot ${i + 1}" class="fb-si" />
+						<button type="button" class="fb-sr" data-role="screenshot-remove" data-index="${i}" aria-label="Remove screenshot">✕</button>
+					</div>
+				`,
+			)
+			.join('')
+		const errorHtml = screenshotError
+			? `<div class="fb-upe">⚠ ${escapeHtml(screenshotError)}</div>`
+			: ''
+		const limitHtml = atMax ? `<div class="fb-sl">Max ${MAX_SCREENSHOTS}</div>` : ''
+		return screenshotError || screenshots.length > 0 || atMax
+			? `<div class="fb-up-extras">${errorHtml}${
+					screenshots.length > 0
+						? `<div class="fb-ss">${previewsHtml}</div>`
+						: ''
+				}${limitHtml}</div>`
+			: ''
+	}
+
+	// Surgically refresh ONLY the pick button (disabled state + label/spinner)
+	// without rebuilding its parents. Leaves the comment textarea, its focus,
+	// caret, and any in-progress text untouched. No-op if the panel is not
+	// currently rendered (e.g. closed) or the screenshot option is off.
+	function updateUploadButton(): void {
+		if (!showScreenshotOption) return
+		const pickBtn = panelEl.querySelector<HTMLButtonElement>(
+			'button[data-role="screenshot-pick"]',
+		)
+		if (!pickBtn) return
+		const atMax = screenshots.length >= MAX_SCREENSHOTS
+		const btnDisabled = isUploadingScreenshot || atMax
+		pickBtn.disabled = btnDisabled
+		pickBtn.classList.toggle('fb-upb--dis', btnDisabled)
+		pickBtn.innerHTML = buildUploadButtonInner()
+	}
+
+	// Surgically re-render ONLY the upload extras container (error, previews,
+	// max-limit notice) and reattach the remove-button listeners inside it.
+	// Nothing outside `.fb-up` is touched, so the textarea survives.
+	function updateUploadExtras(): void {
+		if (!showScreenshotOption) return
+		const container = panelEl.querySelector<HTMLDivElement>('.fb-up')
+		if (!container) return
+		container.innerHTML = buildUploadExtrasHtml()
+		container
+			.querySelectorAll<HTMLButtonElement>('button[data-role="screenshot-remove"]')
+			.forEach(btn => {
+				btn.addEventListener('click', () => {
+					const idx = Number(btn.dataset.index)
+					if (Number.isInteger(idx)) removeScreenshot(idx)
+				})
+			})
 	}
 
 	async function submitForm(): Promise<void> {
@@ -645,50 +734,8 @@ export function initUseroFeedbackWidget(
 		// keep the panel compact (matches the legacy react-feedback-collector
 		// layout). Upload extras (error message, previews, max limit) live on
 		// their own row beneath, so they can wrap freely.
-		const uploadBtnHtml = showScreenshotOption
-			? (() => {
-					const atMax = screenshots.length >= MAX_SCREENSHOTS
-					const btnDisabled = isUploadingScreenshot || atMax
-					return `
-						<input type="file" accept="image/*" data-role="screenshot-input" style="display:none;" aria-label="Choose screenshot" />
-						<button type="button" class="fb-upb ${btnDisabled ? 'fb-upb--dis' : ''}" data-role="screenshot-pick" ${btnDisabled ? 'disabled' : ''} style="border:1px solid ${theme.border};color:${theme.text};">
-							${
-								isUploadingScreenshot
-									? '<span class="fb-ups"></span> Uploading...'
-									: '📷 Add screenshot'
-							}
-						</button>
-					`
-				})()
-			: ''
-		const uploadExtrasHtml = showScreenshotOption
-			? (() => {
-					const atMax = screenshots.length >= MAX_SCREENSHOTS
-					const previewsHtml = screenshots
-						.map(
-							(shot, i) => `
-								<div class="fb-sp">
-									<img src="${escapeHtml(shot.url)}" alt="Screenshot ${i + 1}" class="fb-si" />
-									<button type="button" class="fb-sr" data-role="screenshot-remove" data-index="${i}" aria-label="Remove screenshot">✕</button>
-								</div>
-							`,
-						)
-						.join('')
-					const errorHtml = screenshotError
-						? `<div class="fb-upe">⚠ ${escapeHtml(screenshotError)}</div>`
-						: ''
-					const limitHtml = atMax
-						? `<div class="fb-sl">Max ${MAX_SCREENSHOTS}</div>`
-						: ''
-					return screenshotError || screenshots.length > 0 || atMax
-						? `<div class="fb-up-extras">${errorHtml}${
-								screenshots.length > 0
-									? `<div class="fb-ss">${previewsHtml}</div>`
-									: ''
-							}${limitHtml}</div>`
-						: ''
-				})()
-			: ''
+		const uploadBtnHtml = showScreenshotOption ? buildUploadButtonHtml() : ''
+		const uploadExtrasHtml = showScreenshotOption ? buildUploadExtrasHtml() : ''
 
 		const emailBlockHtml = showEmailOption
 			? `
@@ -723,7 +770,7 @@ export function initUseroFeedbackWidget(
 						${uploadBtnHtml}
 						<div class="fb-charcount${lowChars ? ' fb-charcount--low' : ''}" data-role="charcount" style="color:${lowChars ? '#dc2626' : theme.text};opacity:${lowChars ? 1 : 0.6};">${remaining} chars remaining</div>
 					</div>
-					${uploadExtrasHtml ? `<div class="fb-up">${uploadExtrasHtml}</div>` : ''}
+					${showScreenshotOption ? `<div class="fb-up">${uploadExtrasHtml}</div>` : ''}
 					${emailBlockHtml}
 					<button class="fb-sub ${submitDisabled ? 'fb-sub--dis' : ''}" type="submit" aria-label="Submit" ${submitDisabled ? 'disabled' : ''} style="${submitStyle}">
 						${isSubmitting ? '<span class="fb-spin"></span>' : ''}
@@ -843,11 +890,22 @@ export function initUseroFeedbackWidget(
 		if (isOpen) close()
 		else open()
 	})
-	backdropEl.addEventListener('click', close)
+	backdropEl.addEventListener('click', () => {
+		// Don't let an accidental backdrop tap dismiss the panel while an upload
+		// or submit is in flight (it would discard in-progress feedback). The
+		// explicit X and floating toggle buttons remain deliberate exits.
+		if (isUploadingScreenshot || isSubmitting) return
+		close()
+	})
 
 	const onKeyDown = (e: KeyboardEvent): void => {
 		if (!isOpen) return
-		if (e.key === 'Escape') close()
+		if (e.key === 'Escape') {
+			// Same guard as the backdrop: an in-flight upload/submit shouldn't be
+			// abandonable by a stray Escape.
+			if (isUploadingScreenshot || isSubmitting) return
+			close()
+		}
 		if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
 			e.preventDefault()
 			void submitForm()

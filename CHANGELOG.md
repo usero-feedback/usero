@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.3
+
+Patch. Fix the feedback widget discarding what you typed while a screenshot uploaded. Adding a screenshot triggered a full panel re-render on upload start and finish, which rebuilt the comment textarea, stole focus and the caret, and wiped any text typed during the upload, so it read as the popup resetting itself mid-typing. Upload state now updates surgically (only the pick button label and the preview/error row), leaving the textarea and your in-progress text untouched. As a guard, an in-flight upload or submit can no longer be dismissed by an accidental backdrop tap or a stray Escape; the explicit close button and floating toggle still close it.
+
 ## 1.1.2
 
 Patch. Moved cross-cutting identity (sdkSessionId, anonymousId, userId) into the SDK core so every plugin reads one source of truth via the plugin context, instead of each plugin minting its own. The session-replay plugin now reads the per-tab sdkSessionId from the core (reusing its existing `usero:session-replay:sdk-session-id` sessionStorage key, so no id rotation in customer browsers) and publishes its recording start epoch into the core. The user-test plugin now attaches the replay linkage at finalise: it sends the core-owned sdkSessionId (the primary key the server uses to resolve the SessionReplay) and, when replay was active, a replayOffsetMs captured at the moment the test started. Both finalise fields are optional, so older servers tolerate them and a test with no active replay still finalises cleanly. user-test does not import the replay plugin, so rrweb stays out of its bundle.
