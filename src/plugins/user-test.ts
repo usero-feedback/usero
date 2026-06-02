@@ -502,78 +502,225 @@ function buildIndicator(host: HTMLElement, store: RecorderStore, callbacks: Indi
 		.btn-ghost { background: transparent; color: rgba(255,255,255,0.7); }
 		.btn-ghost:hover { background: rgba(255,255,255,0.10); color: #fff; }
 
-		/* Thanks overlay + end-of-test note */
+		/* ---- Finished screen (complete + ended-early). Usero warm-stone palette,
+		   shadow-DOM scoped so host CSS can't leak in. Scrollable so the primary
+		   action stays reachable on a short phone with the keyboard open. ---- */
 		.thanks {
 			position: fixed; inset: 0;
-			display: grid; place-items: center;
-			background: rgba(15, 15, 17, 0.78);
-			backdrop-filter: blur(6px);
-			-webkit-backdrop-filter: blur(6px);
-			color: #fff;
-			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+			display: flex; align-items: flex-start; justify-content: center;
+			background: rgba(28, 25, 23, 0.62);
+			backdrop-filter: blur(8px);
+			-webkit-backdrop-filter: blur(8px);
+			color: #1c1917;
+			font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
 			z-index: 2147483647;
-			padding: 24px;
-			text-align: center;
+			padding: 24px 16px calc(env(safe-area-inset-bottom, 0px) + 24px);
+			overflow-y: auto;
+			-webkit-overflow-scrolling: touch;
 		}
 		.thanks-card {
-			background: #fff; color: #111;
-			border-radius: 18px; padding: 28px 24px;
-			max-width: 420px; width: 100%;
-			box-shadow: 0 20px 50px rgba(0,0,0,0.25);
+			background: #fff; color: #1c1917;
+			border-radius: 22px; padding: 30px 24px 24px;
+			max-width: 400px; width: 100%;
+			margin: auto 0;
+			box-shadow: 0 24px 60px rgba(28, 25, 23, 0.28), 0 2px 8px rgba(28, 25, 23, 0.12);
 			text-align: left;
+			animation: thanks-in 0.34s cubic-bezier(0.16, 1, 0.3, 1);
+		}
+		@keyframes thanks-in {
+			from { opacity: 0; transform: translateY(14px) scale(0.985); }
+			to   { opacity: 1; transform: translateY(0) scale(1); }
 		}
 		.thanks-card .head { text-align: center; }
-		.thanks h2 { margin: 0 0 6px; font-size: 20px; }
-		.thanks .lede { margin: 0 0 18px; font-size: 14px; line-height: 1.45; color: #4b5563; text-align: center; }
+		.thanks h2 {
+			margin: 0 0 7px; font-size: 22px; line-height: 1.2;
+			font-weight: 600; letter-spacing: -0.018em; color: #1c1917;
+		}
+		.thanks .lede {
+			margin: 0 auto 22px; font-size: 14.5px; line-height: 1.5;
+			color: #57534e; text-align: center; max-width: 30ch;
+		}
+
+		/* Status medallion: green tick when complete, warm ring when ended early */
 		.thanks .check {
-			width: 44px; height: 44px; border-radius: 50%;
-			background: #10b981; color: #fff;
+			width: 56px; height: 56px; border-radius: 50%;
 			display: grid; place-items: center;
-			margin: 0 auto 12px;
-			font-size: 22px;
+			margin: 0 auto 16px;
+		}
+		.thanks .check.ok {
+			background: #ecfdf5;
+			box-shadow: inset 0 0 0 1px rgba(16,185,129,0.22);
+			color: #059669;
+		}
+		.thanks .check.ok svg { width: 26px; height: 26px; }
+		.thanks .check.early {
+			background: #fff7ed;
+			box-shadow: inset 0 0 0 1px rgba(234,88,12,0.20);
+			color: #ea580c;
+		}
+		.thanks .check.early svg { width: 24px; height: 24px; }
+
+		/* Verified-checks list (complete) / progress list (ended early) */
+		.thanks .checks {
+			list-style: none; margin: 0 0 4px; padding: 0;
+			border: 1px solid #f0eeec; border-radius: 14px;
+			background: #fafaf9; overflow: hidden;
+		}
+		.thanks .checks li {
+			display: flex; align-items: center; gap: 11px;
+			padding: 12px 14px; font-size: 14px; color: #292524;
+			border-top: 1px solid #f0eeec;
+		}
+		.thanks .checks li:first-child { border-top: 0; }
+		.thanks .checks .ic {
+			width: 20px; height: 20px; border-radius: 50%;
+			display: grid; place-items: center; flex-shrink: 0;
+		}
+		.thanks .checks .ic.done { background: #d1fae5; color: #059669; }
+		.thanks .checks .ic.todo { background: #f5f5f4; color: #a8a29e; box-shadow: inset 0 0 0 1px #e7e5e4; }
+		.thanks .checks .ic svg { width: 12px; height: 12px; }
+		.thanks .checks li.muted-row { color: #78716c; }
+
+		/* Payout block (complete) */
+		.thanks .payout { margin-top: 20px; }
+		.thanks .payout-q {
+			font-size: 12px; font-weight: 600; letter-spacing: 0.04em;
+			text-transform: uppercase; color: #a8a29e;
+			margin: 0 0 10px;
+		}
+		.thanks .pay-primary {
+			width: 100%; box-sizing: border-box;
+			appearance: none; border: 0; cursor: pointer;
+			background: #ea580c; color: #fff;
+			padding: 15px 18px; border-radius: 14px;
+			font: inherit; font-weight: 600; font-size: 15.5px;
+			line-height: 1.3; text-align: center;
+			box-shadow: 0 6px 16px rgba(234, 88, 12, 0.28);
+			transition: background 0.15s ease, transform 0.07s ease, box-shadow 0.15s ease;
+		}
+		.thanks .pay-primary:hover { background: #c2410c; }
+		.thanks .pay-primary:active { transform: scale(0.985); }
+		.thanks .pay-primary:focus-visible { outline: 2px solid #ea580c; outline-offset: 2px; }
+		.thanks .pay-primary[disabled] { opacity: 0.6; cursor: progress; box-shadow: none; }
+		.thanks .pay-primary .amt { font-variant-numeric: tabular-nums; }
+		.thanks .pay-alt {
+			display: block; width: 100%;
+			margin-top: 12px; padding: 4px;
+			background: none; border: 0; cursor: pointer;
+			font: inherit; font-size: 13px; font-weight: 500;
+			color: #78716c; text-align: center;
+			text-decoration: underline; text-underline-offset: 2px;
+			transition: color 0.15s ease;
+		}
+		.thanks .pay-alt:hover { color: #44403c; }
+		.thanks .pay-alt:focus-visible { outline: 2px solid #ea580c; outline-offset: 2px; border-radius: 6px; }
+		.thanks [hidden] { display: none !important; }
+
+		/* Alternate-email expander */
+		.thanks .pay-edit { margin-top: 14px; animation: pop-in 0.2s cubic-bezier(0.2,0.8,0.2,1); }
+		.thanks .pay-edit[hidden] { display: none; }
+		.thanks .pay-label {
+			display: block; margin: 0 0 7px;
+			font-size: 13px; font-weight: 500; color: #44403c;
+		}
+		.thanks .pay-input {
+			width: 100%; box-sizing: border-box;
+			padding: 12px 13px;
+			background: #fff; border: 1px solid #e7e5e4; border-radius: 11px;
+			font: inherit; font-size: 15px; color: #1c1917;
+			transition: border-color 0.15s ease, box-shadow 0.15s ease;
+		}
+		.thanks .pay-input:focus {
+			outline: none; border-color: #ea580c;
+			box-shadow: 0 0 0 3px rgba(234, 88, 12, 0.16);
+		}
+		.thanks .pay-input::placeholder { color: #a8a29e; }
+		.thanks .pay-eta {
+			margin: 14px 0 0; font-size: 12px; line-height: 1.45;
+			color: #a8a29e; text-align: center;
+		}
+
+		/* Ended-early "what unlocks the reward" note */
+		.thanks .early-note {
+			display: flex; align-items: flex-start; gap: 10px;
+			margin-top: 18px; padding: 13px 14px;
+			background: #fff7ed; border: 1px solid #fed7aa; border-radius: 13px;
+			font-size: 13.5px; line-height: 1.45; color: #9a3412;
+		}
+		.thanks .early-note svg { width: 17px; height: 17px; flex-shrink: 0; margin-top: 1px; color: #ea580c; }
+		.thanks .early-actions { margin-top: 18px; display: flex; flex-direction: column; gap: 10px; }
+		.thanks .resume-btn {
+			width: 100%; box-sizing: border-box;
+			appearance: none; border: 0; cursor: pointer;
+			background: #ea580c; color: #fff;
+			padding: 15px 18px; border-radius: 14px;
+			font: inherit; font-weight: 600; font-size: 15.5px;
+			box-shadow: 0 6px 16px rgba(234, 88, 12, 0.28);
+			transition: background 0.15s ease, transform 0.07s ease;
+		}
+		.thanks .resume-btn:hover { background: #c2410c; }
+		.thanks .resume-btn:active { transform: scale(0.985); }
+		.thanks .resume-btn:focus-visible { outline: 2px solid #ea580c; outline-offset: 2px; }
+		.thanks .exit-btn {
+			width: 100%; box-sizing: border-box;
+			appearance: none; border: 0; background: none; cursor: pointer;
+			padding: 4px; font: inherit; font-size: 13px; line-height: 1.45;
+			color: #78716c; text-align: center;
+		}
+		.thanks .exit-btn:hover { color: #44403c; }
+		.thanks .exit-btn:focus-visible { outline: 2px solid #ea580c; outline-offset: 2px; border-radius: 6px; }
+
+		/* End-of-test note (shown after payout is set, complete path only) */
+		.thanks .note-section {
+			margin-top: 22px; padding-top: 20px;
+			border-top: 1px solid #f0eeec;
 		}
 		.thanks .end-label {
 			display: block; margin: 0 0 8px;
-			font-size: 13px; font-weight: 500; color: #374151;
+			font-size: 13px; font-weight: 500; color: #44403c;
 		}
 		.thanks .end-textarea {
 			width: 100%; box-sizing: border-box;
-			min-height: 96px; resize: vertical;
-			padding: 11px 12px;
-			background: #f9fafb;
-			border: 1px solid #e5e7eb;
-			border-radius: 10px;
-			font: inherit; font-size: 14px; line-height: 1.5;
-			color: #111;
-			transition: border-color 0.15s ease, background 0.15s ease;
+			min-height: 84px; resize: vertical;
+			padding: 12px 13px;
+			background: #fafaf9;
+			border: 1px solid #e7e5e4;
+			border-radius: 12px;
+			font: inherit; font-size: 14.5px; line-height: 1.5;
+			color: #1c1917;
+			transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
 		}
 		.thanks .end-textarea:focus {
-			outline: none; border-color: #111; background: #fff;
+			outline: none; border-color: #ea580c; background: #fff;
+			box-shadow: 0 0 0 3px rgba(234, 88, 12, 0.14);
 		}
-		.thanks .end-textarea::placeholder { color: #9ca3af; }
+		.thanks .end-textarea::placeholder { color: #a8a29e; }
 		.thanks .end-actions {
 			display: flex; gap: 10px; margin-top: 14px;
 		}
 		.thanks .end-actions button {
 			flex: 1;
-			appearance: none; border: 1px solid #e5e7eb;
-			background: #fff; color: #111;
-			padding: 11px 14px; border-radius: 10px;
+			appearance: none; border: 1px solid #e7e5e4;
+			background: #fff; color: #44403c;
+			padding: 12px 14px; border-radius: 12px;
 			font: inherit; font-weight: 600; font-size: 14px;
 			cursor: pointer;
 			transition: background 0.15s ease, border-color 0.15s ease;
 		}
-		.thanks .end-actions button:hover { background: #f3f4f6; }
+		.thanks .end-actions button:hover { background: #fafaf9; border-color: #d6d3d1; }
 		.thanks .end-actions button.primary {
-			background: #111; color: #fff; border-color: #111;
+			background: #1c1917; color: #fff; border-color: #1c1917; flex: 1.4;
 		}
-		.thanks .end-actions button.primary:hover { background: #1f2937; border-color: #1f2937; }
-		.thanks .end-actions button:focus-visible { outline: 2px solid #111; outline-offset: 2px; }
+		.thanks .end-actions button.primary:hover { background: #292524; border-color: #292524; }
+		.thanks .end-actions button:focus-visible { outline: 2px solid #ea580c; outline-offset: 2px; }
 		.thanks .end-hint {
-			margin: 10px 0 0; font-size: 11.5px; color: #9ca3af; text-align: center;
+			margin: 11px 0 0; font-size: 11.5px; color: #a8a29e; text-align: center;
 		}
 		.thanks .end-sent {
-			margin-top: 14px; text-align: center; color: #4b5563; font-size: 13px;
+			margin-top: 16px; text-align: center; color: #57534e; font-size: 13.5px; line-height: 1.45;
+		}
+		@media (prefers-reduced-motion: reduce) {
+			.thanks-card, .thanks .pay-edit { animation: none; }
 		}
 
 		@keyframes pulse {
@@ -672,6 +819,11 @@ function buildIndicator(host: HTMLElement, store: RecorderStore, callbacks: Indi
 const MIC_ICON_SVG = `<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" width="13" height="13"><path d="M8 1.5a2 2 0 0 0-2 2v4a2 2 0 1 0 4 0v-4a2 2 0 0 0-2-2Z" fill="currentColor"/><path d="M4 7.5a4 4 0 0 0 8 0M8 11.5v3M5.5 14.5h5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`
 const MIC_MUTED_ICON_SVG = `<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" width="13" height="13"><path d="M8 1.5a2 2 0 0 0-2 2v3.2L10 11V3.5a2 2 0 0 0-2-2Z" fill="currentColor"/><path d="M4 7.5a4 4 0 0 0 6.5 3.12M12 7.5a4 4 0 0 1-.3 1.5M8 11.5v3M5.5 14.5h5M2 2l12 12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`
 const NOTE_ICON_SVG = `<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" width="14" height="14"><path d="M3 3.5A1.5 1.5 0 0 1 4.5 2h7A1.5 1.5 0 0 1 13 3.5V10a1.5 1.5 0 0 1-1.5 1.5H7L4 14v-2.5h-.5A1.5 1.5 0 0 1 2 10V3.5A1.5 1.5 0 0 1 3.5 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+// Thanks-screen icons: bold tick (medallion + done rows) and a clock (ended early).
+const TICK_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5 12.5 10 17.5 19 7" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+const TICK_SM_SVG = `<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3.5 8.5 6.5 11.5 12.5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+const CLOCK_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="8.4" stroke="currentColor" stroke-width="2"/><path d="M12 7.5V12l3 2" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+const SPARK_ICON_SVG = `<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M8 1.5 9.5 6.5 14.5 8 9.5 9.5 8 14.5 6.5 9.5 1.5 8 6.5 6.5Z" fill="currentColor"/></svg>`
 
 function installTasksToggle(bar: HTMLElement, finishBtn: HTMLElement, store: RecorderStore, onToggleTasks: () => void): void {
 	const tasksBtn = document.createElement('button')
@@ -923,52 +1075,290 @@ function closeNotePopover(store: RecorderStore): void {
 	store.notePopoverAtMs = null
 }
 
-function showThanksScreen(
-	root: ShadowRoot,
-	opts: { onSubmitNote: (text: string) => Promise<void> | void; onSkip: () => void },
-): void {
+// Escape user-controlled strings before they touch innerHTML. The payout email
+// comes from our own DB, but it originated as participant input, so treat it as
+// untrusted and never interpolate it raw into markup.
+function escapeHtml(value: string): string {
+	return value
+		.replace(/&/g, '&amp;')
+		.replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;')
+		.replace(/"/g, '&quot;')
+		.replace(/'/g, '&#39;')
+}
+
+function isValidEmail(value: string): boolean {
+	// Pragmatic check; the server re-validates with zod .email().
+	return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
+}
+
+interface ThanksOptions {
+	// Payment summary from the first finalise response. Null when the server is
+	// older / didn't return it: we fall back to the neutral note-only screen.
+	payment: PaymentSummary | null
+	// Confirm the participant's payout destination. Resolves true on success.
+	onPayout: (destination: string | null) => Promise<boolean>
+	// End-of-test wrap-up note (complete path). Throws on failure so the UI can retry.
+	onSubmitNote: (text: string) => Promise<void> | void
+	onSkip: () => void
+	// Re-arm recording and dismiss the overlay (ended-early path "Resume").
+	onResume: () => void
+}
+
+function showThanksScreen(root: ShadowRoot, opts: ThanksOptions): void {
 	const overlay = document.createElement('div')
 	overlay.className = 'thanks'
+	overlay.setAttribute('role', 'dialog')
+	overlay.setAttribute('aria-modal', 'true')
 
 	const card = document.createElement('div')
 	card.className = 'thanks-card'
+	overlay.appendChild(card)
+	root.appendChild(overlay)
+
+	// Ended-early branch: warmer, non-punishing, keep Resume primary.
+	if (opts.payment && !opts.payment.qualified) {
+		renderEndedEarly(card, opts)
+		return
+	}
+
+	// Complete branch (also the fallback when payment is null: a clean "saved"
+	// confirmation with the wrap-up note, no payout block since we have no data).
+	renderComplete(card, opts)
+}
+
+// Builds the verified-checks list. `done` rows get the green tick; an unfinished
+// tasks row (ended-early) gets the hollow todo dot.
+function checksList(rows: Array<{ label: string; done: boolean; muted?: boolean }>): string {
+	const items = rows
+		.map(r => {
+			const icClass = r.done ? 'ic done' : 'ic todo'
+			const icon = r.done ? TICK_SM_SVG : ''
+			const liClass = r.muted ? ' class="muted-row"' : ''
+			return `<li${liClass}><span class="${icClass}" aria-hidden="true">${icon}</span><span>${escapeHtml(r.label)}</span></li>`
+		})
+		.join('')
+	return `<ul class="checks">${items}</ul>`
+}
+
+function renderComplete(card: HTMLElement, opts: ThanksOptions): void {
+	const payment = opts.payment
+	const reward = payment?.reward ?? null
+	const defaultEmail = payment?.payoutEmail ?? null
+	const tasksTotal = payment?.tasksTotal ?? 0
 
 	const head = document.createElement('div')
 	head.className = 'head'
+	const lede = reward
+		? `We have your recording. Confirm where to send your ${escapeHtml(reward)} and the team will review it shortly.`
+		: 'We have your recording. Thanks for taking the time to walk us through it.'
 	head.innerHTML = `
-		<div class="check" aria-hidden="true">&#10003;</div>
-		<h2>Thanks for testing</h2>
-		<p class="lede">Your session was saved. One last thing if you have a moment.</p>
+		<div class="check ok" aria-hidden="true">${TICK_ICON_SVG}</div>
+		<h2>You're done.</h2>
+		<p class="lede">${lede}</p>
+		${tasksTotal > 0
+			? checksList([
+					{ label: tasksTotal === 1 ? '1 task completed' : `All ${tasksTotal} tasks completed`, done: true },
+					{ label: 'Voice recording captured', done: true },
+					{ label: 'Screen replay uploaded', done: true },
+				])
+			: checksList([
+					{ label: 'Voice recording captured', done: true },
+					{ label: 'Screen replay uploaded', done: true },
+				])}
 	`
+	card.appendChild(head)
+
+	// If we have no payment data (older server) skip payout entirely and go
+	// straight to the wrap-up note.
+	if (!payment) {
+		appendNoteSection(card, opts, 'Your session was saved. Anything you would add?')
+		return
+	}
+
+	renderPayout(card, opts, reward, defaultEmail)
+}
+
+// Payout capture: one-tap default to the sign-up email, with a quieter expander
+// to use a different email. Progressive disclosure (the default path is not a form).
+function renderPayout(card: HTMLElement, opts: ThanksOptions, reward: string | null, defaultEmail: string | null): void {
+	const wrap = document.createElement('div')
+	wrap.className = 'payout'
+
+	const rewardLabel = reward ?? 'my reward'
+	const haveDefault = !!defaultEmail && isValidEmail(defaultEmail)
+
+	wrap.innerHTML = `
+		<p class="payout-q">Where should we send ${escapeHtml(reward ?? 'your reward')}?</p>
+		<button type="button" class="pay-primary" ${haveDefault ? '' : 'hidden'}>
+			Send <span class="amt">${escapeHtml(rewardLabel)}</span>${haveDefault ? ` to ${escapeHtml(defaultEmail as string)}` : ''}
+		</button>
+		<button type="button" class="pay-alt">${haveDefault ? 'Use a different email' : 'Add your payout email'}</button>
+		<div class="pay-edit" ${haveDefault ? 'hidden' : ''}>
+			<label class="pay-label" for="usero-payout-email">Payout email</label>
+			<input id="usero-payout-email" class="pay-input" type="email" inputmode="email"
+				autocomplete="email" placeholder="you@example.com" value="${haveDefault ? '' : escapeHtml(defaultEmail ?? '')}" />
+		</div>
+		<p class="pay-eta">Reward arrives within about 2 days of the team reviewing it.</p>
+	`
+	card.appendChild(wrap)
+
+	const primary = wrap.querySelector<HTMLButtonElement>('.pay-primary')
+	const altLink = wrap.querySelector<HTMLButtonElement>('.pay-alt')
+	const editBox = wrap.querySelector<HTMLElement>('.pay-edit')
+	const emailInput = wrap.querySelector<HTMLInputElement>('.pay-input')
+	if (!primary || !altLink || !editBox || !emailInput) return
+
+	const confirm = async (destination: string | null): Promise<void> => {
+		primary.disabled = true
+		altLink.style.pointerEvents = 'none'
+		const ok = await opts.onPayout(destination)
+		// Whatever the network outcome, the session is payable (server defaults to
+		// the sign-up email). Move the participant forward rather than trapping them.
+		wrap.remove()
+		const confirmedTo = destination ?? defaultEmail
+		const sentMsg = confirmedTo
+			? `${reward ? `${reward} is` : "Your reward is"} set to go to ${confirmedTo}.`
+			: 'Your reward is on its way.'
+		const note = ok ? sentMsg : `${sentMsg} (We will retry sending the details.)`
+		appendNoteSection(card, opts, `${note} Anything you would add before you go?`)
+	}
+
+	// One-tap default path.
+	primary.addEventListener('click', () => { void confirm(null) })
+
+	// Expander: reveal the email field, focus it, submit on Enter.
+	const openEditor = (): void => {
+		primary.hidden = true
+		altLink.hidden = true
+		editBox.hidden = false
+		// Append a confirm button under the input on first open.
+		if (!editBox.querySelector('.pay-confirm')) {
+			const btn = document.createElement('button')
+			btn.type = 'button'
+			btn.className = 'pay-primary pay-confirm'
+			btn.style.marginTop = '12px'
+			btn.textContent = reward ? `Send ${reward} here` : 'Use this email'
+			editBox.appendChild(btn)
+			btn.addEventListener('click', () => void submitEmail())
+		}
+		window.requestAnimationFrame(() => emailInput.focus({ preventScroll: true }))
+	}
+
+	const submitEmail = async (): Promise<void> => {
+		const value = emailInput.value.trim().toLowerCase()
+		if (!isValidEmail(value)) {
+			emailInput.focus()
+			emailInput.style.borderColor = '#dc2626'
+			return
+		}
+		await confirm(value)
+	}
+
+	altLink.addEventListener('click', openEditor)
+	emailInput.addEventListener('input', () => { emailInput.style.borderColor = '' })
+	emailInput.addEventListener('keydown', e => {
+		if (e.key === 'Enter') { e.preventDefault(); void submitEmail() }
+	})
+}
+
+function renderEndedEarly(card: HTMLElement, opts: ThanksOptions): void {
+	const payment = opts.payment
+	const done = payment?.tasksDone ?? 0
+	const total = payment?.tasksTotal ?? 0
+	const reward = payment?.reward ?? null
+
+	const head = document.createElement('div')
+	head.className = 'head'
+	const lede = total > 0
+		? `We saw ${done} of ${total} ${total === 1 ? 'task' : 'tasks'} finished. No worries, you can pick up right where you left off.`
+		: 'It looks like the session ended before you finished. No worries, you can pick up where you left off.'
+	head.innerHTML = `
+		<div class="check early" aria-hidden="true">${CLOCK_ICON_SVG}</div>
+		<h2>Looks like you stopped early</h2>
+		<p class="lede">${lede}</p>
+	`
+	card.appendChild(head)
+
+	// Per-task progress when we know the counts: done rows ticked, the rest hollow.
+	if (total > 0) {
+		const rows: Array<{ label: string; done: boolean }> = []
+		for (let i = 0; i < total; i += 1) {
+			rows.push({ label: `Task ${i + 1}`, done: i < done })
+		}
+		const list = document.createElement('div')
+		list.innerHTML = checksList(rows)
+		const ul = list.firstElementChild
+		if (ul) card.appendChild(ul)
+	}
+
+	const note = document.createElement('div')
+	note.className = 'early-note'
+	note.innerHTML = `${SPARK_ICON_SVG}<span><strong style="font-weight:600">Resume the test.</strong> ${
+		reward ? `Your ${escapeHtml(reward)} reward unlocks` : 'The reward unlocks'
+	} once all ${total > 0 ? total : 'the'} ${total === 1 ? 'task is' : 'tasks are'} done.</span>`
+	card.appendChild(note)
+
+	const actions = document.createElement('div')
+	actions.className = 'early-actions'
+	const resume = document.createElement('button')
+	resume.type = 'button'
+	resume.className = 'resume-btn'
+	resume.textContent = 'Resume where I left off'
+	const exit = document.createElement('button')
+	exit.type = 'button'
+	exit.className = 'exit-btn'
+	exit.textContent = "Thanks for trying. No reward this time since the tasks weren't finished."
+	actions.appendChild(resume)
+	actions.appendChild(exit)
+	card.appendChild(actions)
+
+	resume.addEventListener('click', () => {
+		const overlay = card.closest('.thanks')
+		if (overlay instanceof HTMLElement) overlay.remove()
+		opts.onResume()
+	})
+	exit.addEventListener('click', () => {
+		card.innerHTML = ''
+		const sent = document.createElement('p')
+		sent.className = 'end-sent'
+		sent.textContent = 'Thanks for giving it a go. You can close this tab now.'
+		card.appendChild(sent)
+	})
+}
+
+// The wrap-up note section, shared by the complete path (after payout) and the
+// older-server fallback. Mirrors the prior behaviour: Cmd/Ctrl+Enter to send,
+// retry on failure, skip allowed.
+function appendNoteSection(card: HTMLElement, opts: ThanksOptions, prompt: string): void {
+	const section = document.createElement('div')
+	section.className = 'note-section'
 
 	const form = document.createElement('form')
 	form.noValidate = true
 	form.innerHTML = `
-		<label class="end-label" for="usero-end-note">Anything you would add?</label>
+		<label class="end-label" for="usero-end-note">${escapeHtml(prompt)}</label>
 		<textarea
 			id="usero-end-note"
 			class="end-textarea"
-			rows="4"
+			rows="3"
 			placeholder="Confusing bits, things you liked, what you'd change..."
 		></textarea>
 		<div class="end-actions">
 			<button type="button" class="skip">Skip</button>
-			<button type="submit" class="primary">Send</button>
+			<button type="submit" class="primary">Send feedback</button>
 		</div>
 		<p class="end-hint">Cmd or Ctrl plus Enter to send. Either button is fine.</p>
 	`
-
-	card.appendChild(head)
-	card.appendChild(form)
-	overlay.appendChild(card)
-	root.appendChild(overlay)
+	section.appendChild(form)
+	card.appendChild(section)
 
 	const ta = form.querySelector<HTMLTextAreaElement>('#usero-end-note')
 	const skipBtn = form.querySelector<HTMLButtonElement>('button.skip')
 	if (!ta || !skipBtn) return
 
 	const swapToSent = (message: string): void => {
-		form.remove()
+		section.remove()
 		const sent = document.createElement('p')
 		sent.className = 'end-sent'
 		sent.textContent = message
@@ -977,7 +1367,6 @@ function showThanksScreen(
 
 	const ERROR_CLASS = 'end-error'
 	const showError = (message: string): void => {
-		// Remove any prior error so we don't stack them on repeated retries.
 		const prior = form.querySelector(`.${ERROR_CLASS}`)
 		if (prior) prior.remove()
 		const err = document.createElement('p')
@@ -996,8 +1385,6 @@ function showThanksScreen(
 		if (submitBtn) submitBtn.disabled = true
 		if (text) {
 			try {
-				// 30s timeout. fetch can hang on flaky networks; we don't want
-				// the user staring at a disabled form forever.
 				await Promise.race([
 					Promise.resolve(opts.onSubmitNote(text)),
 					new Promise<never>((_, reject) => {
@@ -1006,7 +1393,6 @@ function showThanksScreen(
 				])
 				swapToSent('Thanks. You can close this tab.')
 			} catch {
-				// Re-enable inputs so the user can retry. No emdashes in copy.
 				ta.disabled = false
 				skipBtn.disabled = false
 				if (submitBtn) submitBtn.disabled = false
@@ -1014,7 +1400,7 @@ function showThanksScreen(
 			}
 		} else {
 			opts.onSkip()
-			swapToSent('All good. You can close this tab.')
+			swapToSent('All set. You can close this tab.')
 		}
 	}
 
@@ -1089,6 +1475,45 @@ interface FinaliseNote {
 	text: string
 }
 
+// Participant-facing payment summary the finalise endpoint returns on the FIRST
+// call. Drives the finished screen: `qualified` picks the complete vs ended-early
+// layout, `reward` is the formatted headline (e.g. "$15"), `payoutEmail` seeds the
+// one-tap payout default, tasksDone/tasksTotal drive the ended-early missing line.
+// Every field is optional so an older server (no `payment` block) degrades to the
+// neutral "thanks, saved" screen rather than throwing.
+interface PaymentSummary {
+	qualified: boolean
+	reward: string | null
+	payoutEmail: string | null
+	tasksDone: number
+	tasksTotal: number
+}
+
+interface FinaliseResult {
+	ok: boolean
+	// Only present on the first finalise call (the server computes it once).
+	payment: PaymentSummary | null
+}
+
+function parsePaymentSummary(raw: unknown): PaymentSummary | null {
+	if (typeof raw !== 'object' || raw === null) return null
+	const p = raw as {
+		qualified?: unknown
+		reward?: unknown
+		payoutEmail?: unknown
+		tasksDone?: unknown
+		tasksTotal?: unknown
+	}
+	if (typeof p.qualified !== 'boolean') return null
+	return {
+		qualified: p.qualified,
+		reward: typeof p.reward === 'string' ? p.reward : null,
+		payoutEmail: typeof p.payoutEmail === 'string' ? p.payoutEmail : null,
+		tasksDone: typeof p.tasksDone === 'number' ? p.tasksDone : 0,
+		tasksTotal: typeof p.tasksTotal === 'number' ? p.tasksTotal : 0,
+	}
+}
+
 async function finaliseSession(
 	apiUrl: string,
 	sessionId: string,
@@ -1106,7 +1531,7 @@ async function finaliseSession(
 		sdkSessionId?: string
 		replayOffsetMs?: number
 	} = {},
-): Promise<boolean> {
+): Promise<FinaliseResult> {
 	try {
 		const body: Record<string, unknown> = {
 			durationSeconds: Math.max(0, Math.round(durationSeconds)),
@@ -1133,10 +1558,53 @@ async function finaliseSession(
 			body: JSON.stringify(body),
 			keepalive: true,
 		})
-		return res.ok
+		if (!res.ok) return { ok: false, payment: null }
+		let payment: PaymentSummary | null = null
+		try {
+			const json = (await res.json()) as { payment?: unknown }
+			payment = parsePaymentSummary(json.payment)
+		} catch {
+			// Older server or non-JSON body: degrade to neutral thanks screen.
+		}
+		return { ok: true, payment }
 	} catch {
-		return false
+		return { ok: false, payment: null }
 	}
+}
+
+// POST the participant's payout destination to the SaaS side. Best-effort with a
+// single retry; the destination defaults server-side to the testerEmail when we
+// send only `method`, so a dropped call still leaves a payable session. Returns
+// ok so the UI can confirm or surface a soft error.
+async function postPayout(
+	apiUrl: string,
+	sessionId: string,
+	destination: string | null,
+	logger: PluginContext['logger'],
+): Promise<boolean> {
+	const url = `${apiUrl.replace(/\/$/, '')}/api/user-test-sessions/${encodeURIComponent(sessionId)}/payout`
+	const body: Record<string, unknown> = { method: 'email' }
+	if (destination) body.destination = destination
+	for (let attempt = 0; attempt < 2; attempt += 1) {
+		try {
+			const res = await fetch(url, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(body),
+				keepalive: true,
+			})
+			if (res.ok) return true
+			// 4xx won't improve on retry (bad email, etc.).
+			if (res.status >= 400 && res.status < 500) {
+				logger.warn(`payout rejected with ${res.status}`)
+				return false
+			}
+		} catch (err) {
+			logger.warn(`payout attempt ${attempt + 1} failed`, err)
+		}
+		await new Promise(resolve => setTimeout(resolve, 400 + Math.floor(Math.random() * 200)))
+	}
+	return false
 }
 
 interface PostNoteResult {
@@ -1355,24 +1823,28 @@ async function finishFlow(store: RecorderStore, ctx: PluginContext, opts: { show
 	if (store.replayOffsetAtStartMs !== null) {
 		replayLinkage.replayOffsetMs = store.replayOffsetAtStartMs
 	}
+	// Payment summary from the first finalise response drives the finished screen
+	// (complete vs ended-early, reward headline, one-tap payout default).
+	let payment: PaymentSummary | null = null
 	if (store.sessionId) {
 		// First finalise carries durationSeconds + mutedSegments + any un-acked
 		// notes (recovery channel). End-of-test note is sent via a second
 		// finalise call from the thanks screen.
 		const unackedNotes = store.notes.filter(n => !n.acked).map(n => ({ atMs: n.atMs, text: n.text }))
-		const ok = await finaliseSession(store.options.apiUrl, store.sessionId, durationSeconds, {
+		const result = await finaliseSession(store.options.apiUrl, store.sessionId, durationSeconds, {
 			mutedSegments: store.mutedSegments,
 			notes: unackedNotes,
 			...replayLinkage,
 		})
-		if (ok) {
+		if (result.ok) {
+			payment = result.payment
 			// Mark the un-acked notes we just shipped as acked so the second
 			// finalise call doesn't resend them.
 			for (const n of store.notes) {
 				if (!n.acked) n.acked = true
 			}
 		}
-		store.indicatorState = ok ? 'done' : 'error'
+		store.indicatorState = result.ok ? 'done' : 'error'
 	} else {
 		store.indicatorState = 'error'
 	}
@@ -1380,6 +1852,25 @@ async function finishFlow(store: RecorderStore, ctx: PluginContext, opts: { show
 
 	if (opts.showThanks && store.indicatorRoot && store.indicatorState === 'done') {
 		showThanksScreen(store.indicatorRoot, {
+			payment,
+			onPayout: async destination => {
+				if (!store.sessionId) return false
+				return postPayout(store.options.apiUrl, store.sessionId, destination, ctx.logger)
+			},
+			onResume: () => {
+				// Re-arm an ended-early session: the recording was already stopped +
+				// finalised, so resuming starts a fresh recording leg under the same
+				// sessionId. The server is idempotent on a later finalise; the new
+				// audio chunks continue the same R2 prefix. Reset the finish guard
+				// and timeline anchor so the next Finish re-evaluates completion.
+				store.finishFlowRan = false
+				store.indicatorState = 'recording'
+				store.startedAt = Date.now()
+				store.muted = false
+				store.mutedSinceMs = null
+				renderIndicatorState(store)
+				void startRecording(store, ctx)
+			},
 			onSubmitNote: async text => {
 				if (!store.sessionId) return
 				store.endNote = text
@@ -1388,12 +1879,12 @@ async function finishFlow(store: RecorderStore, ctx: PluginContext, opts: { show
 				// resend. Include any notes that arrived (or failed to ack) between
 				// the two calls.
 				const stillUnacked = store.notes.filter(n => !n.acked).map(n => ({ atMs: n.atMs, text: n.text }))
-				const ok = await finaliseSession(store.options.apiUrl, store.sessionId, durationSeconds, {
+				const result = await finaliseSession(store.options.apiUrl, store.sessionId, durationSeconds, {
 					endNote: text,
 					notes: stillUnacked,
 					...replayLinkage,
 				})
-				if (!ok) throw new Error('finalise failed')
+				if (!result.ok) throw new Error('finalise failed')
 				for (const n of store.notes) {
 					if (!n.acked) n.acked = true
 				}

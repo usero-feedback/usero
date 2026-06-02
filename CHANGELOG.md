@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.5
+
+Patch. User-test plugin: redesign the finished screen for the participant pay flow. When a session completes, the screen now confirms completion with verified checks (tasks, voice recording, screen replay) and captures the payout destination in one tap, defaulting to "Send my $X to <sign-up email>" with a quieter "Use a different email" expander. The destination POSTs to the new `/api/user-test-sessions/:id/payout` endpoint. When a session ends before the tasks are finished, the screen shows a warmer "Looks like you stopped early" state with per-task progress, a primary "Resume where I left off" action, and a graceful non-punishing exit. The finalise response now carries a `payment` summary (qualified, reward, payout email, tasks done/total) so the SDK can pick the right state; older servers that omit it degrade to a neutral "saved" confirmation. Re-skinned to the Usero warm-stone palette. Backwards compatible: no public API or wire-format changes for hosts.
+
 ## 1.1.4
 
 Patch. User-test plugin: adopt a server-created session via the `uts` URL param instead of always minting its own. The Usero participant pay flow now creates the UserTestSession on the entry screen (so it carries the tester's email and recording consent from the start) and redirects to the customer site with `&uts=<id>`. When the plugin sees `uts`, it GETs the new `/api/user-test-sessions/:id/adopt` endpoint for the clientId + tasks and records against that existing session, rather than POSTing a fresh one. This prevents the double-session bug (one emailed, one anonymous). Backwards compatible: open tests using the old `?usero_test=<slug>` link with no `uts` still fall back to creating their own session, so older entry pages keep working. A present-but-unresolvable `uts` surfaces the error state rather than silently creating a second anonymous session.
