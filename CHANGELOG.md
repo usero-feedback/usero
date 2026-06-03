@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.6
+
+Patch. Feedback widget: stop sending an empty-string `userEmail` when the "share my email" box is checked but no address is typed. We now only attach the email when it is non-empty after trimming, matching the existing comment-trim pattern. Previously the empty string reached the server and tripped its email validation, surfacing as an internal server error to the user. Backwards compatible: no public API or wire-format changes.
+
 ## 1.1.5
 
 Patch. User-test plugin: redesign the finished screen for the participant pay flow. When a session completes, the screen now confirms completion with verified checks (tasks, voice recording, screen replay) and captures the payout destination in one tap, defaulting to "Send my $X to <sign-up email>" with a quieter "Use a different email" expander. The destination POSTs to the new `/api/user-test-sessions/:id/payout` endpoint. When a session ends before the tasks are finished, the screen shows a warmer "Looks like you stopped early" state with per-task progress, a primary "Resume where I left off" action, and a graceful non-punishing exit. The finalise response now carries a `payment` summary (qualified, reward, payout email, tasks done/total) so the SDK can pick the right state; older servers that omit it degrade to a neutral "saved" confirmation. Re-skinned to the Usero warm-stone palette. Backwards compatible: no public API or wire-format changes for hosts.

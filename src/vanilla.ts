@@ -585,7 +585,7 @@ export function initUseroFeedbackWidget(
 		const feedbackData: FeedbackData = {
 			rating: selectedRating,
 			comment: comment.trim() || undefined,
-			userEmail: shareEmail ? userEmail : undefined,
+			userEmail: shareEmail && userEmail.trim() ? userEmail.trim() : undefined,
 			screenshots: screenshots.length > 0 ? screenshots : undefined,
 			metadata: {
 				pageUrl: window.location.href,
