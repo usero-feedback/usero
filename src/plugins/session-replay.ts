@@ -23,9 +23,10 @@
 //      the feedback record can FK at the moment of submit. Does NOT
 //      attach `replayEvents` (legacy field) — chunked uploads carry the
 //      events out-of-band.
-//   4. onDestroy / pagehide: best-effort flush remaining buffer, then
-//      sendBeacon to /api/replay-sessions/:id/finalise with the
-//      end-timestamp. Idempotent server-side.
+//   4. onDestroy / pagehide / visibilitychange -> hidden: best-effort flush
+//      remaining buffer, then sendBeacon to
+//      /api/replay-sessions/:id/finalise with the end-timestamp. Idempotent
+//      server-side and via a `stopped` guard client-side.
 //
 // Bundle hygiene: rrweb stays lazy via dynamic `import('rrweb')` behind
 // the engagement gate, so consumers who lose the dice roll or navigate
@@ -150,6 +151,7 @@ interface ReplayStore {
 	chunkFlushTimer: ReturnType<typeof setInterval> | null
 	startTimer: ReturnType<typeof setTimeout> | null
 	pageHideHandler: (() => void) | null
+	visibilityHandler: (() => void) | null
 	shadowUpdateHandler: ((event: Event) => void) | null
 	record: RrwebRecord | null
 	stopRecording: (() => void) | null
@@ -705,6 +707,7 @@ export function sessionReplay(options: SessionReplayOptions = {}): UseroPlugin {
 				chunkFlushTimer: null,
 				startTimer: null,
 				pageHideHandler: null,
+				visibilityHandler: null,
 				shadowUpdateHandler: null,
 				record: null,
 				stopRecording: null,
@@ -718,13 +721,31 @@ export function sessionReplay(options: SessionReplayOptions = {}): UseroPlugin {
 			store.shadowUpdateHandler = onShadowUpdate
 			window.addEventListener('usero:shadow-update', onShadowUpdate)
 
-			const onPageHide = (): void => {
+			// Shared unload backstop for both pagehide and visibilitychange.
+			// The `store.stopped` short-circuit makes it idempotent: whichever
+			// of the two fires first finalises + stops rrweb, the other (and any
+			// later onDestroy) becomes a no-op, so we never double-finalise.
+			const stopOnUnload = (): void => {
+				if (store.stopped) return
 				finalise(store, ctx, { useBeacon: true })
 				store.stopped = true
 				stopRrweb(store)
 			}
-			store.pageHideHandler = onPageHide
-			window.addEventListener('pagehide', onPageHide)
+			store.pageHideHandler = stopOnUnload
+			window.addEventListener('pagehide', stopOnUnload)
+
+			// visibilitychange -> hidden is the reliable mobile backstop:
+			// iOS often tears down a backgrounded tab without ever firing
+			// pagehide, which used to leave the replay un-finalised (no
+			// endedAt). visibilitychange fires consistently on backgrounding, so
+			// flushing + finalising here closes that gap. Guarded by the same
+			// idempotent stopOnUnload.
+			const onVisibilityChange = (): void => {
+				if (document.visibilityState !== 'hidden') return
+				stopOnUnload()
+			}
+			store.visibilityHandler = onVisibilityChange
+			document.addEventListener('visibilitychange', onVisibilityChange)
 
 			const begin = async (): Promise<void> => {
 				if (store.cancelled) return
@@ -804,6 +825,10 @@ export function sessionReplay(options: SessionReplayOptions = {}): UseroPlugin {
 			if (store.pageHideHandler) {
 				window.removeEventListener('pagehide', store.pageHideHandler)
 				store.pageHideHandler = null
+			}
+			if (store.visibilityHandler) {
+				document.removeEventListener('visibilitychange', store.visibilityHandler)
+				store.visibilityHandler = null
 			}
 			if (store.shadowUpdateHandler) {
 				window.removeEventListener('usero:shadow-update', store.shadowUpdateHandler)

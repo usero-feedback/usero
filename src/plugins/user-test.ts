@@ -9,8 +9,8 @@
 //      PUT /api/user-test-sessions/:id/chunk?index=N
 //   3. Renders a small floating "recording" indicator with a Finish button
 //      bottom-center so the tester can stop on their own.
-//   4. On Finish (or `pagehide`), flushes any buffered chunks and calls
-//      POST /api/user-test-sessions/:id/finalise.
+//   4. On Finish (or `pagehide` / `visibilitychange` -> hidden), flushes any
+//      buffered chunks and calls POST /api/user-test-sessions/:id/finalise.
 //
 // Mic-permission denied is non-fatal: the session is still created (the
 // session-replay plugin keeps recording in parallel) and the indicator
@@ -33,7 +33,7 @@ export interface UserTestOptions {
 	// Default `usero_test`. Match SaaS side if you ever change it.
 	queryParam?: string
 	// Audio chunk length in seconds. Smaller = more partial-data resilience
-	// but more requests. Default 30.
+	// but more requests. Default 10.
 	chunkSeconds?: number
 	// API origin. Override for self-hosted or local dev. Defaults to the
 	// shared SDK constant (https://usero.io).
@@ -81,6 +81,7 @@ interface RecorderStore {
 	indicatorRoot: ShadowRoot | null
 	indicatorState: 'recording' | 'finishing' | 'done' | 'no-audio' | 'error'
 	pageHideHandler: (() => void) | null
+	visibilityHandler: (() => void) | null
 	options: Required<UserTestOptions>
 	tasks: UserTestTask[]
 	tasksPanelOpen: boolean
@@ -124,7 +125,12 @@ const DEFAULT_OPTIONS: Required<Omit<UserTestOptions, 'testerName' | 'apiUrl'>> 
 	apiUrl: string
 } = {
 	queryParam: 'usero_test',
-	chunkSeconds: 30,
+	// 10s (not 30) so at most ~10s of audio is at risk if the tab is torn
+	// down before a flush, and so a session shorter than the old 30s window
+	// still emits at least one chunk (previously its single buffered chunk was
+	// never flushed and its audio was lost). Tradeoff: ~3x the R2 writes /
+	// upload requests per session; 10s is an acceptable balance, don't go lower.
+	chunkSeconds: 10,
 	apiUrl: DEFAULT_API_URL,
 	testerName: '',
 	hideIndicator: false,
@@ -2015,6 +2021,7 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				indicatorRoot: null,
 				indicatorState: 'recording',
 				pageHideHandler: null,
+				visibilityHandler: null,
 				options: { ...merged, apiUrl },
 				tasks: [],
 				tasksPanelOpen: readTasksPanelOpen(),
@@ -2141,6 +2148,22 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 			store.pageHideHandler = pageHide
 			window.addEventListener('pagehide', pageHide)
 
+			// visibilitychange -> hidden is the reliable mobile unload backstop:
+			// iOS frequently kills a backgrounded tab WITHOUT ever firing
+			// pagehide, leaving the session stuck un-finalised. visibilitychange
+			// fires far more consistently when the tab is backgrounded. It runs
+			// the SAME finishFlow path as pagehide; finishFlow is idempotent (the
+			// `finishFlowRan` + indicatorState short-circuit at its top), so the
+			// manual Finish click, pagehide, and this handler can fire in any
+			// order or concurrently and only the first does the work. Like
+			// pagehide we don't await; finalise rides on `keepalive: true`.
+			const onVisibilityChange = (): void => {
+				if (document.visibilityState !== 'hidden') return
+				void finishFlow(store, ctx, { showThanks: false })
+			}
+			store.visibilityHandler = onVisibilityChange
+			document.addEventListener('visibilitychange', onVisibilityChange)
+
 			void (async (): Promise<void> => {
 				// If the entry screen created the session and passed `uts`, ADOPT
 				// it (the participant's email is already attached server-side).
@@ -2190,6 +2213,10 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 			if (store.pageHideHandler) {
 				window.removeEventListener('pagehide', store.pageHideHandler)
 				store.pageHideHandler = null
+			}
+			if (store.visibilityHandler) {
+				document.removeEventListener('visibilitychange', store.visibilityHandler)
+				store.visibilityHandler = null
 			}
 			stopRecording(store)
 			if (store.outsidePointerHandler) {
