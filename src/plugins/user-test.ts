@@ -88,6 +88,16 @@ interface RecorderStore {
 	keydownHandler: ((event: KeyboardEvent) => void) | null
 	// Mic mute
 	hasMicPermission: boolean
+	// True while getUserMedia is in flight (pending). Distinguishes the
+	// "connecting" chip state (granted users, promise not yet resolved) from
+	// the genuinely-failed terminal "none" state. Init true; cleared on every
+	// success/failure exit of startRecording.
+	micAcquiring: boolean
+	// Why mic acquisition failed, for actionable terminal copy. 'blocked' =
+	// permission denied (NotAllowedError), 'not-found' = no device
+	// (NotFoundError), 'unsupported' = MediaRecorder/getUserMedia missing or
+	// constructor threw. Null while acquiring or once granted.
+	micFailReason: 'blocked' | 'not-found' | 'unsupported' | null
 	muted: boolean
 	mutedSinceMs: number | null
 	mutedSegments: MutedSegment[]
@@ -374,12 +384,37 @@ function buildIndicator(host: HTMLElement, store: RecorderStore, callbacks: Indi
 			color: #fcd34d;
 		}
 		.mic[data-mic-state="muted"]:hover { background: rgba(251, 191, 36, 0.26); }
-		.mic[data-mic-state="none"] {
-			background: rgba(255,255,255,0.04);
-			color: rgba(255,255,255,0.55);
+		/* Connecting: getUserMedia pending. Steady amber tint reads as "working",
+		   distinct from the live red pulse and the failed state below. The icon
+		   gets a gentle non-pulsing breathe so it feels alive without alarming. */
+		.mic[data-mic-state="connecting"] {
+			background: rgba(251, 191, 36, 0.14);
+			border-color: rgba(251, 191, 36, 0.32);
+			color: #fcd34d;
 			cursor: default;
 		}
-		.mic[data-mic-state="none"]:hover { background: rgba(255,255,255,0.04); }
+		.mic[data-mic-state="connecting"]:hover { background: rgba(251, 191, 36, 0.14); }
+		.mic[data-mic-state="connecting"] .mic-icon {
+			color: #fbbf24;
+			animation: micBreathe 1.4s ease-in-out infinite;
+		}
+		/* Failed terminal state, actionable. Tappable affordance: clearer border,
+		   pointer cursor, brightens on hover/focus to invite the retry tap. */
+		.mic[data-mic-state="none"] {
+			background: rgba(255,255,255,0.05);
+			border-color: rgba(255,255,255,0.14);
+			color: rgba(255,255,255,0.72);
+			cursor: pointer;
+		}
+		.mic[data-mic-state="none"]:hover {
+			background: rgba(255,255,255,0.12);
+			border-color: rgba(255,255,255,0.24);
+			color: #fff;
+		}
+		@keyframes micBreathe {
+			0%, 100% { opacity: 0.55; }
+			50% { opacity: 1; }
+		}
 		.mic-icon { width: 13px; height: 13px; display: inline-block; flex-shrink: 0; }
 		.mic-label { font-weight: 500; letter-spacing: 0.01em; white-space: nowrap; }
 
@@ -864,11 +899,17 @@ function writeTasksPanelOpen(open: boolean): void {
 	try { window.sessionStorage?.setItem(TASKS_PANEL_OPEN_STORAGE_KEY, open ? '1' : '0') } catch { /* ignore */ }
 }
 
-function micChipState(store: RecorderStore): 'recording' | 'muted' | 'none' | 'inactive' {
+function micChipState(store: RecorderStore): 'recording' | 'muted' | 'none' | 'connecting' | 'inactive' {
 	if (store.indicatorState === 'finishing' || store.indicatorState === 'done' || store.indicatorState === 'error') {
 		return 'inactive'
 	}
-	if (!store.hasMicPermission) return 'none'
+	if (!store.hasMicPermission) {
+		// Pending getUserMedia: show "connecting" so granted users never flash
+		// the failure copy. Once startRecording resolves or rejects it clears
+		// micAcquiring, and we fall through to the terminal "none" state.
+		if (store.micAcquiring) return 'connecting'
+		return 'none'
+	}
 	return store.muted ? 'muted' : 'recording'
 }
 
@@ -885,6 +926,11 @@ function renderIndicatorState(store: RecorderStore): void {
 	dot.setAttribute('data-state', store.indicatorState)
 	const chipState = micChipState(store)
 	mic.setAttribute('data-mic-state', chipState === 'inactive' ? 'none' : chipState)
+	// Distinguish "acquiring" (genuinely failed, actionable) from "connecting"
+	// at the attribute level so the dot/visuals key off the right state. The
+	// failed terminal chip is a retry affordance; mark it so CSS can style it.
+	mic.removeAttribute('data-mic-fail')
+	if (chipState === 'none') mic.setAttribute('data-mic-fail', store.micFailReason ?? 'blocked')
 
 	// Finish-button copy is driven by the indicatorState (network / lifecycle).
 	switch (store.indicatorState) {
@@ -924,13 +970,33 @@ function renderIndicatorState(store: RecorderStore): void {
 			mic.setAttribute('aria-pressed', 'true')
 			mic.removeAttribute('tabindex')
 			break
-		case 'none':
-			micIcon.innerHTML = MIC_MUTED_ICON_SVG
-			micLabel.textContent = 'No mic, replay only'
-			mic.setAttribute('aria-label', 'Microphone not granted, replay only')
+		case 'connecting':
+			// getUserMedia still pending. Granted users sit here briefly instead
+			// of flashing the failure copy. Not yet a toggle, so unfocusable.
+			micIcon.innerHTML = MIC_ICON_SVG
+			micLabel.textContent = 'Connecting mic'
+			mic.setAttribute('aria-label', 'Connecting microphone')
 			mic.setAttribute('aria-pressed', 'false')
 			mic.setAttribute('tabindex', '-1')
 			break
+		case 'none': {
+			// Genuinely failed terminal state. Actionable: the chip is a button
+			// that re-attempts mic acquisition. Keyboard-focusable (no tabindex
+			// -1). Replay keeps recording regardless.
+			micIcon.innerHTML = MIC_MUTED_ICON_SVG
+			const failLabel =
+				store.micFailReason === 'not-found' ? 'No mic found, tap to retry' :
+				'Mic blocked, tap to retry'
+			const failAria =
+				store.micFailReason === 'not-found'
+					? 'No microphone found, tap to retry. Replay continues.'
+					: 'Microphone blocked, tap to retry. Replay continues.'
+			micLabel.textContent = failLabel
+			mic.setAttribute('aria-label', failAria)
+			mic.setAttribute('aria-pressed', 'false')
+			mic.removeAttribute('tabindex')
+			break
+		}
 		case 'inactive':
 			micIcon.innerHTML = MIC_ICON_SVG
 			micLabel.textContent =
@@ -1695,8 +1761,15 @@ function enqueueChunk(store: RecorderStore, ctx: PluginContext, blob: Blob): voi
 }
 
 async function startRecording(store: RecorderStore, ctx: PluginContext): Promise<void> {
+	// Re-entrant: the failed chip re-invokes this to retry. Reset to the
+	// pending state so the chip shows "connecting" again during the attempt.
+	store.micAcquiring = true
+	store.micFailReason = null
+	renderIndicatorState(store)
 	if (!isMediaRecorderSupported()) {
 		ctx.logger.warn('MediaRecorder not supported, continuing without audio')
+		store.micAcquiring = false
+		store.micFailReason = 'unsupported'
 		store.indicatorState = 'no-audio'
 		renderIndicatorState(store)
 		return
@@ -1706,12 +1779,18 @@ async function startRecording(store: RecorderStore, ctx: PluginContext): Promise
 		stream = await navigator.mediaDevices.getUserMedia({ audio: true })
 	} catch (err) {
 		ctx.logger.warn('mic permission denied or unavailable', err)
+		store.micAcquiring = false
+		// Distinguish denied (blocked) from no-device (not-found) for copy.
+		const name = err instanceof Error ? err.name : ''
+		store.micFailReason = name === 'NotFoundError' || name === 'DevicesNotFoundError' ? 'not-found' : 'blocked'
 		store.indicatorState = 'no-audio'
 		renderIndicatorState(store)
 		return
 	}
 	store.stream = stream
 	store.hasMicPermission = true
+	store.micAcquiring = false
+	store.micFailReason = null
 	const mimeType = pickMimeType()
 	let recorder: MediaRecorder
 	try {
@@ -1720,6 +1799,9 @@ async function startRecording(store: RecorderStore, ctx: PluginContext): Promise
 		ctx.logger.error('MediaRecorder construction failed', err)
 		stream.getTracks().forEach(t => t.stop())
 		store.stream = null
+		store.hasMicPermission = false
+		store.micAcquiring = false
+		store.micFailReason = 'unsupported'
 		store.indicatorState = 'no-audio'
 		renderIndicatorState(store)
 		return
@@ -1735,6 +1817,13 @@ async function startRecording(store: RecorderStore, ctx: PluginContext): Promise
 	})
 	// `timeslice` makes the recorder emit a self-contained chunk every N ms.
 	recorder.start(store.options.chunkSeconds * 1000)
+	// On a successful (re)acquire, restore the live recording indicator. A
+	// prior failed attempt left indicatorState at 'no-audio' (steady amber
+	// dot); now that audio is live the dot should pulse red again.
+	if (store.indicatorState === 'no-audio') {
+		store.indicatorState = 'recording'
+	}
+	renderIndicatorState(store)
 }
 
 function toggleMute(store: RecorderStore): boolean {
@@ -1932,6 +2021,8 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				outsidePointerHandler: null,
 				keydownHandler: null,
 				hasMicPermission: false,
+				micAcquiring: true,
+				micFailReason: null,
 				muted: false,
 				mutedSinceMs: null,
 				mutedSegments: [],
@@ -1960,7 +2051,15 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 			const onToggleTasks = (): void => setPanelOpen(!store.tasksPanelOpen)
 
 			const onToggleMute = (): void => {
-				if (!store.hasMicPermission) return
+				if (!store.hasMicPermission) {
+					// In the failed terminal state the chip is a retry button:
+					// re-attempt mic acquisition. Ignore taps while still
+					// acquiring (connecting state is unfocusable anyway).
+					if (!store.micAcquiring && store.indicatorState !== 'finishing' && store.indicatorState !== 'done' && store.indicatorState !== 'error') {
+						void startRecording(store, ctx)
+					}
+					return
+				}
 				const ok = toggleMute(store)
 				if (!ok) return
 				if (store.muted) showMuteToast(store)
@@ -2115,4 +2214,4 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 }
 
 // Internal helpers exposed for tests only. Not part of the public API.
-export const __test__ = { getTestSlug, pickMimeType, isMediaRecorderSupported }
+export const __test__ = { getTestSlug, pickMimeType, isMediaRecorderSupported, micChipState }

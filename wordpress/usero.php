@@ -3,7 +3,7 @@
  * Plugin Name:       Usero
  * Plugin URI:        https://usero.io/wordpress
  * Description:       Free feedback widget for WordPress. One inbox for ideas, bugs, and feature requests, with public roadmap and GitHub sync. No per-user fees.
- * Version:           1.1.6
+ * Version:           1.1.7
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            Usero
@@ -19,10 +19,10 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'USERO_VERSION', '1.1.6' );
+define( 'USERO_VERSION', '1.1.7' );
 // Version of the vendored @usero/sdk widget runtime in assets/js/vendor/usero-sdk.iife.js.
 // Bump when you replace the vendored file with a newer SDK build.
-define( 'USERO_SDK_VERSION', '1.1.6' );
+define( 'USERO_SDK_VERSION', '1.1.7' );
 define( 'USERO_PLUGIN_FILE', __FILE__ );
 define( 'USERO_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'USERO_PLUGIN_URL', plugin_dir_url( __FILE__ ) );

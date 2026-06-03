@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.7
+
+Patch. User-test recording pill: stop flashing the "No mic, replay only" failure label to participants who actually granted mic access. The pill used to render before `getUserMedia()` resolved, so granted users briefly saw the terminal failure copy. There is now an explicit "connecting" mic chip state ("Connecting mic", steady amber tint with a gentle breathing icon, distinct from both the live red pulse and the failed state) shown while acquisition is pending, so granted users never see failure copy. The genuinely-failed terminal state is now actionable: it reads "Mic blocked, tap to retry" (or "No mic found, tap to retry" when no device is present), is keyboard-focusable, and re-invokes mic acquisition on click or Enter. Replay keeps recording in every state. Backwards compatible: no public API or wire-format changes.
+
 ## 1.1.6
 
 Patch. Feedback widget: stop sending an empty-string `userEmail` when the "share my email" box is checked but no address is typed. We now only attach the email when it is non-empty after trimming, matching the existing comment-trim pattern. Previously the empty string reached the server and tripped its email validation, surfacing as an internal server error to the user. Backwards compatible: no public API or wire-format changes.
