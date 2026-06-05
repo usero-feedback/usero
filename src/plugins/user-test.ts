@@ -125,6 +125,9 @@ interface RecorderStore {
 	silenceMonitor: { stop(): void } | null
 	muteToastShown: boolean
 	muteToastTimers: number[]
+	// Timers for the "Recording resumed" confirmation pill (shown once after a
+	// resume across a hard navigation). Tracked so onDestroy can clear them.
+	resumeToastTimers: number[]
 	// In-flight notes
 	notes: InFlightNote[]
 	notesPopoverOpen: boolean
@@ -643,6 +646,28 @@ function buildIndicator(host: HTMLElement, store: RecorderStore, callbacks: Indi
 			to { opacity: 0; transform: translateY(4px); }
 		}
 
+		/* "Recording resumed" confirmation: same pill footprint as the mute toast,
+		   but carries the live-record red accent (not the amber warning treatment)
+		   so it reads as reassurance, not a problem. Compact, inline, auto-dismisses.
+		   Leads with the same pulsing record dot used on the bar's mic chip. */
+		.resume-toast {
+			display: inline-flex; align-items: center; gap: 8px;
+			background: rgba(17,17,17,0.92);
+			border: 1px solid rgba(239, 68, 68, 0.42);
+			color: #fff; font-weight: 500; letter-spacing: 0.01em;
+			padding: 8px 13px; border-radius: 999px;
+			box-shadow: 0 12px 28px rgba(0,0,0,0.28);
+			white-space: nowrap;
+			animation: toast-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+		}
+		.resume-toast[data-leaving="true"] { animation: toast-out 0.24s ease forwards; }
+		.resume-toast .dot {
+			width: 7px; height: 7px; border-radius: 50%;
+			background: #ef4444; flex-shrink: 0;
+			box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6);
+			animation: pulse 1.6s ease-out infinite;
+		}
+
 		/* Notes popover */
 		.note-popover {
 			background: rgba(17,17,17,0.94);
@@ -916,7 +941,8 @@ function buildIndicator(host: HTMLElement, store: RecorderStore, callbacks: Indi
 		}
 		@media (prefers-reduced-motion: reduce) {
 			.dot { animation: none; }
-			.toast, .note-popover { animation: none; }
+			.toast, .note-popover, .resume-toast { animation: none; }
+			.resume-toast[data-leaving="true"] { opacity: 0; }
 		}
 	`
 	const anchor = document.createElement('div')
@@ -1223,6 +1249,42 @@ function showMuteToast(store: RecorderStore): void {
 		store.muteToastTimers.push(inner)
 	}, 3000)
 	store.muteToastTimers.push(outer)
+}
+
+// Brief, unobtrusive confirmation that recording picked back up after the
+// participant returned from a hard navigation (e.g. an OAuth round-trip). It
+// reuses the toast slot above the bar and the shared toast-in/out animations,
+// but with the live-record red accent so it reassures rather than warns. Shows
+// once, then auto-dismisses; clears store.resumed so a later render can't
+// re-fire it. Reduced-motion is handled in CSS (no slide, instant fade).
+function showResumedToast(store: RecorderStore): void {
+	if (!store.resumed) return
+	store.resumed = false
+	const root = store.indicatorRoot
+	if (!root) return
+	const slot = root.querySelector('.toast-slot')
+	if (!(slot instanceof HTMLElement)) return
+	slot.innerHTML = ''
+	const toast = document.createElement('div')
+	toast.className = 'resume-toast'
+	toast.setAttribute('role', 'status')
+	const dot = document.createElement('span')
+	dot.className = 'dot'
+	dot.setAttribute('aria-hidden', 'true')
+	const label = document.createElement('span')
+	label.textContent = 'Recording resumed'
+	toast.appendChild(dot)
+	toast.appendChild(label)
+	slot.appendChild(toast)
+	const outer = window.setTimeout(() => {
+		if (!toast.isConnected) return
+		toast.setAttribute('data-leaving', 'true')
+		const inner = window.setTimeout(() => {
+			if (toast.isConnected) toast.remove()
+		}, 260)
+		store.resumeToastTimers.push(inner)
+	}, 3200)
+	store.resumeToastTimers.push(outer)
 }
 
 function openNotePopover(store: RecorderStore, onSave: (text: string) => void, onCancel: () => void): void {
@@ -2459,6 +2521,7 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				silenceMonitor: null,
 				muteToastShown: false,
 				muteToastTimers: [],
+				resumeToastTimers: [],
 				notes: [],
 				notesPopoverOpen: false,
 				notePopoverAtMs: null,
@@ -2664,6 +2727,11 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				}
 				await startRecording(store, ctx)
 				renderIndicatorState(store)
+				// Recorder is live again. If this leg was a resume across a hard
+				// navigation, give the participant a brief, unobtrusive confirmation
+				// that the test is still recording. No-op on a fresh start (the guard
+				// checks store.resumed and clears it so it fires at most once).
+				showResumedToast(store)
 			})()
 		},
 		onDestroy(ctx) {
@@ -2691,6 +2759,10 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				try { window.clearTimeout(id) } catch { /* ignore */ }
 			}
 			store.muteToastTimers = []
+			for (const id of store.resumeToastTimers) {
+				try { window.clearTimeout(id) } catch { /* ignore */ }
+			}
+			store.resumeToastTimers = []
 			if (store.indicator && store.indicator.parentNode) {
 				store.indicator.parentNode.removeChild(store.indicator)
 			}
