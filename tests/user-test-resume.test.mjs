@@ -33,6 +33,8 @@ const {
 	parseActiveSession,
 	readActiveSession,
 	clearActiveSession,
+	persistActiveSession,
+	adoptSession,
 	ACTIVE_SESSION_MAX_AGE_MS,
 	RESUME_MAX_IDLE_MS,
 	ACTIVE_SESSION_STORAGE_KEY,
@@ -215,4 +217,113 @@ test('readActiveSession: an active (never-paused) session ignores the idle gate'
 	assert.ok(parsed)
 	assert.equal(parsed.status, 'active')
 	clearActiveSession()
+})
+
+// Fix 3: pauseFlow sets store.paused BEFORE stopRecording so the final trailing
+// `dataavailable` chunk (which routes through enqueueChunk ->
+// persistActiveSession(store, store.paused || store.finishFlowRan ? 'paused' :
+// 'active')) cannot rewrite the entry to 'active' and drop pausedAt. Without the
+// flag the trailing chunk defeated the RESUME_MAX_IDLE_MS idle gate. We simulate
+// the exact sequence: pause persist, then a trailing-chunk persist, then assert
+// the entry is still paused with pausedAt and the idle gate engages.
+function makeStore(overrides = {}) {
+	return {
+		sessionId: 'id',
+		slug: 's',
+		chunkIndex: 3,
+		startedAt: Date.now() - 60_000,
+		sdkSessionId: undefined,
+		finishFlowRan: false,
+		paused: false,
+		...overrides,
+	}
+}
+
+test('Fix 3: trailing chunk after pause keeps the entry paused with pausedAt', () => {
+	clearActiveSession()
+	const store = makeStore({ paused: true })
+	// pauseFlow's explicit persist.
+	persistActiveSession(store, 'paused')
+	const afterPause = parseActiveSession(JSON.parse(localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY)))
+	assert.equal(afterPause.status, 'paused')
+	assert.ok(typeof afterPause.pausedAt === 'number', 'pausedAt stamped on pause')
+
+	// The trailing dataavailable chunk advances chunkIndex then persists with the
+	// status enqueueChunk derives (store.paused || finishFlowRan ? 'paused' : ...).
+	store.chunkIndex += 1
+	persistActiveSession(store, store.paused || store.finishFlowRan ? 'paused' : 'active')
+	const afterChunk = parseActiveSession(JSON.parse(localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY)))
+	assert.equal(afterChunk.status, 'paused', 'trailing chunk must NOT flip to active')
+	assert.ok(typeof afterChunk.pausedAt === 'number', 'pausedAt survives the trailing chunk')
+	assert.equal(afterChunk.nextChunkIndex, 4, 'chunk index still advanced')
+
+	// And the idle gate engages on the persisted entry.
+	const readBack = readActiveSession()
+	assert.ok(readBack, 'a freshly-paused entry is still resumable')
+	assert.equal(readBack.status, 'paused')
+	clearActiveSession()
+})
+
+test('Fix 3: WITHOUT the paused flag, a trailing chunk would have dropped pausedAt (regression guard)', () => {
+	clearActiveSession()
+	const store = makeStore({ paused: false }) // simulate the OLD bug: flag never set
+	persistActiveSession(store, 'paused')
+	// Old code path: enqueueChunk used `store.finishFlowRan ? 'paused' : 'active'`,
+	// which with finishFlowRan=false wrote 'active' and dropped pausedAt.
+	store.chunkIndex += 1
+	persistActiveSession(store, store.finishFlowRan ? 'paused' : 'active')
+	const after = parseActiveSession(JSON.parse(localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY)))
+	assert.equal(after.status, 'active', 'documents the old clobber: active + no pausedAt')
+	assert.equal(after.pausedAt, undefined)
+	clearActiveSession()
+})
+
+// Fix 5: on resume, only a server "closed" (409/410) clears resume state; a
+// transient network/5xx error must map to { kind: 'error' } so init RETAINS the
+// resume state and a reload can retry. adoptSession is the pure mapper that the
+// init branch keys off; assert the closed-vs-error distinction here.
+test('Fix 5: adoptSession maps 409 -> closed (state will be cleared)', async () => {
+	const orig = globalThis.fetch
+	globalThis.fetch = async () => ({ status: 409, ok: false, json: async () => ({}) })
+	try {
+		const r = await adoptSession('https://x', 'id')
+		assert.equal(r.kind, 'closed')
+	} finally {
+		globalThis.fetch = orig
+	}
+})
+
+test('Fix 5: adoptSession maps 410 -> closed', async () => {
+	const orig = globalThis.fetch
+	globalThis.fetch = async () => ({ status: 410, ok: false, json: async () => ({}) })
+	try {
+		const r = await adoptSession('https://x', 'id')
+		assert.equal(r.kind, 'closed')
+	} finally {
+		globalThis.fetch = orig
+	}
+})
+
+test('Fix 5: adoptSession maps a 5xx -> error (state RETAINED for retry, NOT closed)', async () => {
+	const orig = globalThis.fetch
+	globalThis.fetch = async () => ({ status: 503, ok: false, json: async () => ({}) })
+	try {
+		const r = await adoptSession('https://x', 'id')
+		assert.equal(r.kind, 'error', 'a 5xx is transient, must not be treated as closed')
+	} finally {
+		globalThis.fetch = orig
+	}
+})
+
+test('Fix 5: adoptSession maps a fetch reject (offline) -> error (state RETAINED)', async () => {
+	const orig = globalThis.fetch
+	globalThis.fetch = async () => {
+		throw new Error('network down')
+	}
+	try {
+		const r = await adoptSession('https://x', 'id')
+		assert.equal(r.kind, 'error', 'an offline fetch reject must not clear resume state')
+	} finally {
+		globalThis.fetch = orig
+	}
 })

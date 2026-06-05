@@ -40,6 +40,7 @@
 // touch the camera, and never persist audio in the browser past the
 // IndexedDB fallback (cleared on successful upload).
 
+import { isValidSdkSessionId } from '../identity'
 import type { UseroPlugin, PluginContext } from '../plugin'
 import { DEFAULT_API_URL } from '../types'
 
@@ -136,6 +137,13 @@ interface RecorderStore {
 	endNote: string
 	// Re-entry guard for finishFlow.
 	finishFlowRan: boolean
+	// True once pauseFlow has run for a hard navigation (page hidden mid-test).
+	// Set BEFORE stopRecording() so the final trailing `dataavailable` chunk that
+	// stopRecording triggers persists as 'paused' (keeping pausedAt), not 'active'.
+	// Without this the trailing enqueueChunk rewrote the entry to 'active' and
+	// dropped pausedAt, defeating the RESUME_MAX_IDLE_MS idle gate. Reset to false
+	// on a successful resume (the recorder is live again).
+	paused: boolean
 	// True when this store was rehydrated from persisted localStorage state
 	// (a resume across a hard navigation) rather than a fresh start. Lets the
 	// init path skip session creation/adoption and continue the chunk index.
@@ -246,7 +254,7 @@ function parseActiveSession(raw: unknown): ActiveSessionState | null {
 	}
 	// Loose sanity filter, same shape the core uses for the id. A bad value is
 	// dropped (resume still works for audio, only the replay link is at risk).
-	if (typeof s.sdkSessionId === 'string' && /^[a-z0-9-]{8,}$/i.test(s.sdkSessionId)) {
+	if (typeof s.sdkSessionId === 'string' && isValidSdkSessionId(s.sdkSessionId)) {
 		result.sdkSessionId = s.sdkSessionId
 	}
 	if (typeof s.pausedAt === 'number' && Number.isFinite(s.pausedAt)) {
@@ -2029,8 +2037,12 @@ function enqueueChunk(store: RecorderStore, ctx: PluginContext, blob: Blob): voi
 	const index = store.chunkIndex
 	store.chunkIndex += 1
 	// Advance the persisted resume pointer so a hard navigation mid-recording
-	// resumes from the next index, never re-using one already shipped.
-	persistActiveSession(store, store.finishFlowRan ? 'paused' : 'active')
+	// resumes from the next index, never re-using one already shipped. If the
+	// page is pausing (store.paused, set before stopRecording) or finishing, the
+	// trailing chunk stopRecording flushes must persist as 'paused' so pausedAt is
+	// preserved and the RESUME_MAX_IDLE_MS idle gate engages; an 'active' write
+	// here would clobber pausedAt.
+	persistActiveSession(store, store.paused || store.finishFlowRan ? 'paused' : 'active')
 	store.pendingUploads += 1
 	const sessionId = store.sessionId
 	const apiUrl = store.options.apiUrl
@@ -2375,6 +2387,11 @@ function pauseFlow(store: RecorderStore): void {
 	if (store.finishFlowRan || store.indicatorState === 'finishing' || store.indicatorState === 'done') return
 	// No live session yet (still creating/adopting): nothing to persist or stop.
 	if (!store.sessionId) return
+	// Flag paused BEFORE stopRecording so the final trailing `dataavailable` chunk
+	// that recorder.requestData()/stop() flushes (which routes through
+	// enqueueChunk -> persistActiveSession) writes 'paused' and keeps pausedAt,
+	// rather than overwriting the entry with 'active' and dropping the idle clock.
+	store.paused = true
 	flushMuteIfActive(store)
 	stopRecording(store)
 	// Mark the persisted state paused at the current chunk index. The queued
@@ -2582,6 +2599,7 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				notePopoverAtMs: null,
 				endNote: '',
 				finishFlowRan: false,
+				paused: false,
 				resumed: isResume,
 				sdkSessionId: null,
 				replayOffsetAtStartMs: null,
@@ -2745,6 +2763,17 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 						clearActiveSession()
 						return
 					}
+					if (adopted.kind === 'error') {
+						// Transient adopt failure (fetch rejected / 5xx on flaky wifi),
+						// NOT a server "closed". RETAIN the resume state so a reload can
+						// retry; clearing it here would strand a still-live session. Only
+						// a `closed` result (409/410, handled above) clears state. We stop
+						// without recording this leg and show the retry-able error UI.
+						ctx.logger.warn('user-test adopt failed transiently on resume; keeping resume state for retry')
+						store.indicatorState = 'error'
+						renderIndicatorState(store)
+						return
+					}
 					created = adopted.kind === 'ok' ? adopted : null
 				} else {
 					created = await createSession(apiUrl, slug, readTesterName(merged.testerName))
@@ -2752,9 +2781,11 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				}
 				if (!created) {
 					ctx.logger.error(adoptId ? 'failed to adopt user-test session' : 'failed to create user-test session')
-					// A resume that can't re-adopt its session (server says gone, or
-					// network down) clears the stale pointer so we don't loop trying
-					// to resume a session that no longer exists.
+					// Resume's adopt failures are now fully handled above ('closed'
+					// clears + returns; transient 'error' RETAINS state + returns), so a
+					// resume never reaches here with created === null. This branch is the
+					// createSession (fresh, non-resume) failure path. The isResume clear is
+					// a defensive no-op kept in case a future code path falls through.
 					if (isResume) clearActiveSession()
 					store.indicatorState = 'error'
 					renderIndicatorState(store)
@@ -2854,6 +2885,8 @@ export const __test__ = {
 	parseActiveSession,
 	readActiveSession,
 	clearActiveSession,
+	persistActiveSession,
+	adoptSession,
 	ACTIVE_SESSION_MAX_AGE_MS,
 	RESUME_MAX_IDLE_MS,
 	ACTIVE_SESSION_STORAGE_KEY,

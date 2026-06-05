@@ -138,6 +138,19 @@ export function rotateAnonymousId(): string {
 }
 
 /**
+ * Loose sanity filter for a persisted/incoming sdkSessionId: >=8 chars of
+ * alphanumerics or hyphens. NOT strict validation. We accept anything that
+ * looks plausibly like an id so older SDK builds (and cross-plugin re-seats)
+ * still stitch; a fresh mint is cheap, so we only reject obvious garbage.
+ * Tightening this would force rotation in customer browsers and split
+ * otherwise-good sibling-session attribution. Single source of truth so the
+ * mint / read / re-seat / resume-persist paths can never drift apart.
+ */
+export function isValidSdkSessionId(id: string): boolean {
+	return /^[a-z0-9-]{8,}$/i.test(id)
+}
+
+/**
  * Returns the stable per-tab sdkSessionId. Core-owned so every plugin
  * (replay, user-test, future feedback linkage) reads the SAME id for a
  * given tab. Reads sessionStorage at most once per SDK instance; later
@@ -151,7 +164,7 @@ export function rotateAnonymousId(): string {
 export function getOrMintSdkSessionId(): string {
 	if (cachedSdkSessionId) return cachedSdkSessionId
 	const existing = safeReadSessionStorage(SDK_SESSION_STORAGE_KEY)
-	if (existing && /^[a-z0-9-]{8,}$/i.test(existing)) {
+	if (existing && isValidSdkSessionId(existing)) {
 		cachedSdkSessionId = existing
 		return existing
 	}
@@ -180,7 +193,7 @@ export function getOrMintSdkSessionId(): string {
  * is corrected (the cache is the read-through path).
  */
 export function reseatSdkSessionId(id: string): void {
-	if (!/^[a-z0-9-]{8,}$/i.test(id)) return
+	if (!isValidSdkSessionId(id)) return
 	if (cachedSdkSessionId === id) return
 	cachedSdkSessionId = id
 	safeWriteSessionStorage(SDK_SESSION_STORAGE_KEY, id)

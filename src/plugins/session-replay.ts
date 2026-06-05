@@ -32,7 +32,7 @@
 // the engagement gate, so consumers who lose the dice roll or navigate
 // away inside the gate window pay zero rrweb bytes.
 
-import { getOrMintAnonymousId } from '../identity'
+import { getOrMintAnonymousId, isValidSdkSessionId } from '../identity'
 import type { UseroPlugin, PluginContext } from '../plugin'
 
 export interface ReplaySampling {
@@ -243,7 +243,7 @@ function generateRandomId(): string {
 function mintSdkSessionId(): string {
 	try {
 		const existing = window.sessionStorage?.getItem(SDK_SESSION_STORAGE_KEY)
-		if (existing && /^[a-z0-9-]{8,}$/i.test(existing)) return existing
+		if (existing && isValidSdkSessionId(existing)) return existing
 	} catch {
 		// sessionStorage can throw in sandboxed iframes — fall through.
 	}
