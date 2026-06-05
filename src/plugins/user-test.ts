@@ -814,6 +814,12 @@ function buildIndicator(host: HTMLElement, store: RecorderStore, callbacks: Indi
 			color: #ea580c;
 		}
 		.thanks .check.early svg { width: 24px; height: 24px; }
+		.thanks .check.ended {
+			background: #f5f5f4;
+			box-shadow: inset 0 0 0 1px rgba(120,113,108,0.20);
+			color: #78716c;
+		}
+		.thanks .check.ended svg { width: 24px; height: 24px; }
 
 		/* Verified-checks list (complete) / progress list (ended early) */
 		.thanks .checks {
@@ -1080,6 +1086,9 @@ const TICK_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3
 const TICK_SM_SVG = `<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3.5 8.5 6.5 11.5 12.5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`
 const CLOCK_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="8.4" stroke="currentColor" stroke-width="2"/><path d="M12 7.5V12l3 2" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`
 const SPARK_ICON_SVG = `<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M8 1.5 9.5 6.5 14.5 8 9.5 9.5 8 14.5 6.5 9.5 1.5 8 6.5 6.5Z" fill="currentColor"/></svg>`
+// Calm "wrapped up" mark for the terminal ended-session screen: a finish flag,
+// not a celebratory tick (this is a neutral end state, not a passing reward).
+const FLAG_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 21V4M6 4.5h9.5l-1.6 3.2 1.6 3.2H6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`
 
 function installTasksToggle(bar: HTMLElement, finishBtn: HTMLElement, store: RecorderStore, onToggleTasks: () => void): void {
 	const tasksBtn = document.createElement('button')
@@ -1476,6 +1485,37 @@ function showThanksScreen(root: ShadowRoot, opts: ThanksOptions): void {
 	// Complete branch (also the fallback when payment is null: a clean "saved"
 	// confirmation with the wrap-up note, no payout block since we have no data).
 	renderComplete(card, opts)
+}
+
+// Terminal notice shown when a resume attempt finds the session already closed
+// (server returned 409/410 on adopt, e.g. the participant took too long on a
+// third-party sign-in and the stale sweep finalised it). Reuses the ended-early
+// screen's overlay + card so it matches the recorder's visual language exactly,
+// but renders a single calm, honest message with no actions: the test is over,
+// there is nothing to resume. Copy does not over-promise: it says earlier
+// responses were saved, which is true because the session was finalised
+// server-side, so any recording already uploaded is intact.
+function showSessionEndedScreen(root: ShadowRoot): void {
+	// Don't stack a second overlay if a thanks/ended screen is already up.
+	if (root.querySelector('.thanks')) return
+
+	const overlay = document.createElement('div')
+	overlay.className = 'thanks'
+	overlay.setAttribute('role', 'dialog')
+	overlay.setAttribute('aria-modal', 'true')
+
+	const card = document.createElement('div')
+	card.className = 'thanks-card'
+	const head = document.createElement('div')
+	head.className = 'head'
+	head.innerHTML = `
+		<div class="check ended" aria-hidden="true">${FLAG_ICON_SVG}</div>
+		<h2>This test session ended</h2>
+		<p class="lede">Thanks for taking part. Your earlier responses were saved. You can close this tab.</p>
+	`
+	card.appendChild(head)
+	overlay.appendChild(card)
+	root.appendChild(overlay)
 }
 
 // Builds the verified-checks list. `done` rows get the green tick; an unfinished
@@ -2761,6 +2801,12 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 						// no recording, no error UI (the test is legitimately over).
 						ctx.logger.info('user-test session already closed on adopt; not resuming')
 						clearActiveSession()
+						// Don't leave the participant on a silent page with no idea the
+						// test ended. Show a brief, honest terminal notice (no actions,
+						// nothing to resume). Skip when the indicator is suppressed.
+						if (store.indicatorRoot && !merged.hideIndicator) {
+							showSessionEndedScreen(store.indicatorRoot)
+						}
 						return
 					}
 					if (adopted.kind === 'error') {
