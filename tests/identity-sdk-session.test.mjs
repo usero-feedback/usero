@@ -65,3 +65,47 @@ test('reseatSdkSessionId no-ops on a malformed id (never poisons the tab id)', (
 	reseatSdkSessionId('no') // too short for the sanity filter
 	assert.equal(getOrMintSdkSessionId(), real)
 })
+
+// P1-1: session-replay reads getSdkSessionId() LAZILY (at createSession time),
+// not once at onInit. This models the swapped plugin order
+// [sessionReplay(), userTest()]: session-replay's onInit runs first (capturing
+// the fresh post-nav id), THEN user-test's onInit re-seats the durable id. If
+// session-replay had captured the id eagerly at onInit it would write the
+// replay row under the stale id; reading lazily at createSession honours the
+// re-seat and both orderings land on the SAME id.
+test('lazy read at createSession honours a re-seat from a later-registered plugin (swapped order)', () => {
+	resetIdentityState()
+	sessionStorage.removeItem(SDK_SESSION_STORAGE_KEY)
+
+	// 1. session-replay onInit (registered FIRST) would mint a fresh post-nav id.
+	const eagerAtOnInit = getOrMintSdkSessionId()
+	assert.match(eagerAtOnInit, /^[a-z0-9-]{8,}$/i)
+
+	// 2. user-test onInit (registered SECOND) re-seats the durable pre-nav id.
+	reseatSdkSessionId('durable-pre-nav-id-1234')
+
+	// 3. session-replay's async begin()/createSession reads the id NOW (lazy).
+	//    It must see the re-seated id, NOT the stale onInit mint.
+	const lazyAtCreateSession = getOrMintSdkSessionId()
+	assert.equal(lazyAtCreateSession, 'durable-pre-nav-id-1234')
+	assert.notEqual(lazyAtCreateSession, eagerAtOnInit)
+})
+
+test('both plugin orderings resolve to the SAME re-seated id at createSession time', () => {
+	// Order A: [userTest(), sessionReplay()] — user-test onInit re-seats first.
+	resetIdentityState()
+	sessionStorage.removeItem(SDK_SESSION_STORAGE_KEY)
+	reseatSdkSessionId('shared-resume-id-abcdef')
+	const orderA = getOrMintSdkSessionId() // session-replay createSession reads after
+
+	// Order B: [sessionReplay(), userTest()] — session-replay onInit mints first.
+	resetIdentityState()
+	sessionStorage.removeItem(SDK_SESSION_STORAGE_KEY)
+	getOrMintSdkSessionId() // stale onInit mint, discarded by the re-seat
+	reseatSdkSessionId('shared-resume-id-abcdef')
+	const orderB = getOrMintSdkSessionId() // session-replay createSession reads after
+
+	assert.equal(orderA, 'shared-resume-id-abcdef')
+	assert.equal(orderB, 'shared-resume-id-abcdef')
+	assert.equal(orderA, orderB)
+})

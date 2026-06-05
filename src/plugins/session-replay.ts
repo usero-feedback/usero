@@ -794,12 +794,17 @@ export function sessionReplay(options: SessionReplayOptions = {}): UseroPlugin {
 				ctx.logger.error('session-replay needs an apiUrl (via options or PluginContext)')
 				return
 			}
-			// Prefer the core-owned per-tab id so user-test and replay share
-			// the SAME sdkSessionId for this tab (the server resolves the
-			// SessionReplay by clientId + sdkSessionId). Fall back to local
-			// minting only when the host predates the core accessor (older
-			// SDK embed); both paths read/write the same sessionStorage key.
-			const sdkSessionId = ctx.getSdkSessionId ? ctx.getSdkSessionId() : mintSdkSessionId()
+			// Resolve the core-owned per-tab id LAZILY (at createSession time,
+			// inside begin() below), NOT once here at onInit. user-test's resume
+			// path calls reseatSdkSessionId() during ITS onInit; if a consumer
+			// registers [sessionReplay(), userTest()], session-replay's onInit
+			// runs FIRST and would capture the pre-reseat id, writing the live
+			// replay row under the stale id and breaking the audio<->replay join
+			// regardless of plugin order. getSdkSessionId() reads through the
+			// in-memory cache that reseatSdkSessionId() updates, so reading it at
+			// createSession time honours a later re-seat no matter the order.
+			const resolveSdkSessionId = (): string =>
+				ctx.getSdkSessionId ? ctx.getSdkSessionId() : mintSdkSessionId()
 			// Mint or read the cross-session anonymousId. Cached in module
 			// scope after the first call, so this stays O(1) on hot paths.
 			const anonymousId = getOrMintAnonymousId()
@@ -807,7 +812,9 @@ export function sessionReplay(options: SessionReplayOptions = {}): UseroPlugin {
 			const store: ReplayStore = {
 				options: { ...merged, apiUrl },
 				clientId: ctx.clientId,
-				sdkSessionId,
+				// Filled in lazily at createSession time (see resolveSdkSessionId)
+				// so a user-test re-seat during a later onInit is honoured.
+				sdkSessionId: '',
 				sessionReplayId: null,
 				recordingStartedAt: null,
 				pendingEvents: [],
@@ -878,6 +885,10 @@ export function sessionReplay(options: SessionReplayOptions = {}): UseroPlugin {
 				} catch (err) {
 					ctx.logger.warn('resolveUser threw at session start', err)
 				}
+				// Read the id NOW (not at onInit) so a user-test resume re-seat
+				// that ran in a later plugin's onInit is reflected here.
+				const sdkSessionId = resolveSdkSessionId()
+				store.sdkSessionId = sdkSessionId
 				const created = await createSession(apiUrl, ctx.clientId, sdkSessionId, anonymousId)
 				if (!created) {
 					ctx.logger.warn('session create failed, replay disabled')

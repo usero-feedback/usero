@@ -182,6 +182,13 @@ const ACTIVE_SESSION_STORAGE_KEY = 'usero:user-test:active-session'
 // init, so a long-abandoned entry can never silently start recording on an
 // unrelated later visit. Matches the spirit of the server-side stale sweep.
 const ACTIVE_SESSION_MAX_AGE_MS = 2 * 60 * 60 * 1000 // 2h
+// Max idle time between the page hiding (pauseFlow writes pausedAt) and the
+// participant returning, for a paused session to still be RESUME-eligible. The
+// 2h ACTIVE_SESSION_MAX_AGE_MS cap is anchored to startedAt (test start) and is
+// never refreshed, so without this an unrelated return to the origin within 2h
+// would re-adopt the test and silently re-acquire the mic. 30 min is a sane
+// "they stepped away and came back" bound; longer idle => session is abandoned.
+const RESUME_MAX_IDLE_MS = 30 * 60 * 1000 // 30m
 const IDB_NAME = 'usero-user-test'
 const IDB_STORE = 'pending-chunks'
 
@@ -206,6 +213,12 @@ interface ActiveSessionState {
 	// (clientId, sdkSessionId) match. Optional: absent when replay was not active
 	// (nothing to keep linked), or when an older SDK wrote the entry.
 	sdkSessionId?: string
+	// Wall-clock ms when the page last hid mid-test (pauseFlow). Distinct from
+	// startedAt (test start, used for duration/anchoring, never refreshed).
+	// Resume eligibility is gated on time-since-pausedAt (RESUME_MAX_IDLE_MS) so
+	// returning to the origin hours later for an UNRELATED reason can't silently
+	// re-adopt the test and re-acquire the mic. Absent until the first pause.
+	pausedAt?: number
 }
 
 function parseActiveSession(raw: unknown): ActiveSessionState | null {
@@ -217,6 +230,7 @@ function parseActiveSession(raw: unknown): ActiveSessionState | null {
 		startedAt?: unknown
 		status?: unknown
 		sdkSessionId?: unknown
+		pausedAt?: unknown
 	}
 	if (typeof s.slug !== 'string' || !s.slug) return null
 	if (typeof s.sessionId !== 'string' || !s.sessionId) return null
@@ -235,6 +249,9 @@ function parseActiveSession(raw: unknown): ActiveSessionState | null {
 	if (typeof s.sdkSessionId === 'string' && /^[a-z0-9-]{8,}$/i.test(s.sdkSessionId)) {
 		result.sdkSessionId = s.sdkSessionId
 	}
+	if (typeof s.pausedAt === 'number' && Number.isFinite(s.pausedAt)) {
+		result.pausedAt = s.pausedAt
+	}
 	return result
 }
 
@@ -251,6 +268,18 @@ function readActiveSession(): ActiveSessionState | null {
 		if (Date.now() - parsed.startedAt > ACTIVE_SESSION_MAX_AGE_MS) {
 			clearActiveSession()
 			return null
+		}
+		// Idle gate: a paused session (the page hid mid-test) is only resumable
+		// for RESUME_MAX_IDLE_MS after the pause. Beyond that, treat the test as
+		// abandoned so an unrelated return to this origin (within the 2h
+		// startedAt cap, which never refreshes) can't silently re-adopt it and
+		// re-acquire the mic. startedAt stays the duration anchor; pausedAt is the
+		// idle clock.
+		if (parsed.status === 'paused' && typeof parsed.pausedAt === 'number') {
+			if (Date.now() - parsed.pausedAt > RESUME_MAX_IDLE_MS) {
+				clearActiveSession()
+				return null
+			}
 		}
 		return parsed
 	} catch {
@@ -286,6 +315,13 @@ function persistActiveSession(store: RecorderStore, status: 'active' | 'paused')
 		status,
 	}
 	if (store.sdkSessionId) state.sdkSessionId = store.sdkSessionId
+	// Stamp pausedAt when the page hides mid-test so resume eligibility can be
+	// gated on idle time (see RESUME_MAX_IDLE_MS in readActiveSession). An
+	// 'active' write (recording start / chunk index advance) intentionally omits
+	// pausedAt: the participant is live, so the idle clock should be cleared.
+	if (status === 'paused') {
+		state.pausedAt = Date.now()
+	}
 	writeActiveSession(state)
 }
 
@@ -1260,6 +1296,13 @@ function showMuteToast(store: RecorderStore): void {
 function showResumedToast(store: RecorderStore): void {
 	if (!store.resumed) return
 	store.resumed = false
+	// Only show the reassuring "Recording resumed" pill when the mic genuinely
+	// came back live. If getUserMedia rejected on resume (blocked / no device /
+	// unsupported -> hasMicPermission false, indicatorState 'no-audio'), a green
+	// pill claiming we're recording would be a lie while audio is dead. Bail and
+	// let the existing mic-blocked affordance (the mic chip in its failed state)
+	// carry the message instead. Same signal the mic chip gates on (line ~1119).
+	if (!store.hasMicPermission || store.indicatorState === 'no-audio') return
 	const root = store.indicatorRoot
 	if (!root) return
 	const slot = root.querySelector('.toast-slot')
@@ -1753,20 +1796,32 @@ async function createSession(
 // state (we deliberately do NOT silently fall back to createSession here: a
 // present-but-unresolvable uts means something is wrong, and creating a second
 // anonymous session is exactly the double-session bug we're avoiding).
-async function adoptSession(
-	apiUrl: string,
-	sessionId: string,
-): Promise<{ sessionId: string; clientId: string; tasks: UserTestTask[] } | null> {
+// Result of adopting (or re-adopting on resume) a server-created session.
+//   - 'ok': adopted, carry on recording.
+//   - 'closed': the server rejected with 409/410 because the session is already
+//     completed/failed (e.g. finalised by the stale sweep). The caller MUST
+//     clear resume state and NOT start recording, so we never resurrect a closed
+//     session and upload post-finalise chunks.
+//   - 'error': not found / network / malformed. Treated as a hard failure (no
+//     resume), same as the legacy null return.
+type AdoptResult =
+	| { kind: 'ok'; sessionId: string; clientId: string; tasks: UserTestTask[] }
+	| { kind: 'closed' }
+	| { kind: 'error' }
+
+async function adoptSession(apiUrl: string, sessionId: string): Promise<AdoptResult> {
 	try {
 		const res = await fetch(`${apiUrl.replace(/\/$/, '')}/api/user-test-sessions/${encodeURIComponent(sessionId)}/adopt`, {
 			method: 'GET',
 		})
-		if (!res.ok) return null
+		// 409 Conflict / 410 Gone => the session is closed. Don't resurrect it.
+		if (res.status === 409 || res.status === 410) return { kind: 'closed' }
+		if (!res.ok) return { kind: 'error' }
 		const json = (await res.json()) as { sessionId?: unknown; clientId?: unknown; tasks?: unknown }
-		if (typeof json.sessionId !== 'string' || typeof json.clientId !== 'string') return null
-		return { sessionId: json.sessionId, clientId: json.clientId, tasks: parseTasks(json.tasks) }
+		if (typeof json.sessionId !== 'string' || typeof json.clientId !== 'string') return { kind: 'error' }
+		return { kind: 'ok', sessionId: json.sessionId, clientId: json.clientId, tasks: parseTasks(json.tasks) }
 	} catch {
-		return null
+		return { kind: 'error' }
 	}
 }
 
@@ -2677,10 +2732,24 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				// adopt is an idempotent GET, so re-adopting a still-active session
 				// on resume is safe and does not disturb its server state.
 				const adoptId = resumable?.sessionId ?? getAdoptSessionId()
-				const created = adoptId
-					? await adoptSession(apiUrl, adoptId)
-					: await createSession(apiUrl, slug, readTesterName(merged.testerName))
-				if (store.cancelled) return
+				let created: { sessionId: string; clientId: string; tasks: UserTestTask[] } | null
+				if (adoptId) {
+					const adopted = await adoptSession(apiUrl, adoptId)
+					if (store.cancelled) return
+					if (adopted.kind === 'closed') {
+						// The server says this session is already finalised/failed (e.g.
+						// closed by the stale sweep). Resume must NOT resurrect it and
+						// upload post-finalise chunks. Clear the resume pointer and stop:
+						// no recording, no error UI (the test is legitimately over).
+						ctx.logger.info('user-test session already closed on adopt; not resuming')
+						clearActiveSession()
+						return
+					}
+					created = adopted.kind === 'ok' ? adopted : null
+				} else {
+					created = await createSession(apiUrl, slug, readTesterName(merged.testerName))
+					if (store.cancelled) return
+				}
 				if (!created) {
 					ctx.logger.error(adoptId ? 'failed to adopt user-test session' : 'failed to create user-test session')
 					// A resume that can't re-adopt its session (server says gone, or
@@ -2783,5 +2852,9 @@ export const __test__ = {
 	SILENCE_RMS_DB_THRESHOLD,
 	SILENCE_FLOOR_DB,
 	parseActiveSession,
+	readActiveSession,
+	clearActiveSession,
 	ACTIVE_SESSION_MAX_AGE_MS,
+	RESUME_MAX_IDLE_MS,
+	ACTIVE_SESSION_STORAGE_KEY,
 }
