@@ -102,6 +102,12 @@ interface RecorderStore {
 	muted: boolean
 	mutedSinceMs: number | null
 	mutedSegments: MutedSegment[]
+	// Silent-mic guard. micSilent is true while the live input is reading
+	// digital silence (dead mic, or a virtual audio device delivering nothing).
+	// Non-blocking: recording continues; the pill just warns. Auto-clears when
+	// real audio returns. silenceMonitor holds the AnalyserNode teardown.
+	micSilent: boolean
+	silenceMonitor: { stop(): void } | null
 	muteToastShown: boolean
 	muteToastTimers: number[]
 	// In-flight notes
@@ -905,7 +911,7 @@ function writeTasksPanelOpen(open: boolean): void {
 	try { window.sessionStorage?.setItem(TASKS_PANEL_OPEN_STORAGE_KEY, open ? '1' : '0') } catch { /* ignore */ }
 }
 
-function micChipState(store: RecorderStore): 'recording' | 'muted' | 'none' | 'connecting' | 'inactive' {
+function micChipState(store: RecorderStore): 'recording' | 'muted' | 'none' | 'connecting' | 'silent' | 'inactive' {
 	if (store.indicatorState === 'finishing' || store.indicatorState === 'done' || store.indicatorState === 'error') {
 		return 'inactive'
 	}
@@ -916,7 +922,12 @@ function micChipState(store: RecorderStore): 'recording' | 'muted' | 'none' | 'c
 		if (store.micAcquiring) return 'connecting'
 		return 'none'
 	}
-	return store.muted ? 'muted' : 'recording'
+	if (store.muted) return 'muted'
+	// Permission granted and not muted, but the live track is reading digital
+	// silence (dead mic or a virtual silent input device). Warn, non-blocking:
+	// recording continues, this just prompts the participant to check their mic.
+	if (store.micSilent) return 'silent'
+	return 'recording'
 }
 
 function renderIndicatorState(store: RecorderStore): void {
@@ -931,7 +942,11 @@ function renderIndicatorState(store: RecorderStore): void {
 
 	dot.setAttribute('data-state', store.indicatorState)
 	const chipState = micChipState(store)
-	mic.setAttribute('data-mic-state', chipState === 'inactive' ? 'none' : chipState)
+	// The silent-mic warning reuses the existing "none" warning treatment
+	// (muted-grey, tappable retry affordance) rather than inventing a new visual
+	// — same as the "Mic blocked, tap to retry" failed state, just different copy.
+	const micStateAttr = chipState === 'inactive' || chipState === 'silent' ? 'none' : chipState
+	mic.setAttribute('data-mic-state', micStateAttr)
 	// Distinguish "acquiring" (genuinely failed, actionable) from "connecting"
 	// at the attribute level so the dot/visuals key off the right state. The
 	// failed terminal chip is a retry affordance; mark it so CSS can style it.
@@ -984,6 +999,18 @@ function renderIndicatorState(store: RecorderStore): void {
 			mic.setAttribute('aria-label', 'Connecting microphone')
 			mic.setAttribute('aria-pressed', 'false')
 			mic.setAttribute('tabindex', '-1')
+			break
+		case 'silent':
+			// Permission granted, recording live, but the input is digital
+			// silence (dead mic or a virtual silent device). Warn, non-blocking:
+			// recording continues. Tappable so the participant can re-acquire the
+			// mic after switching their input device. Auto-clears when real audio
+			// returns (the monitor flips store.micSilent back to false).
+			micIcon.innerHTML = MIC_MUTED_ICON_SVG
+			micLabel.textContent = "We can't hear you, tap to recheck"
+			mic.setAttribute('aria-label', "We can't hear your microphone. Check your input device, then tap to recheck. Recording continues.")
+			mic.setAttribute('aria-pressed', 'false')
+			mic.removeAttribute('tabindex')
 			break
 		case 'none': {
 			// Genuinely failed terminal state. Actionable: the chip is a button
@@ -1766,11 +1793,172 @@ function enqueueChunk(store: RecorderStore, ctx: PluginContext, blob: Blob): voi
 	})
 }
 
+// ---------------------------------------------------------------------------
+// Silent-microphone guard
+//
+// A dead mic, or a virtual audio input device that macOS hands Chrome (e.g.
+// "Background Music", a Zoom/Teams virtual mic), delivers digital silence.
+// getUserMedia succeeds, MediaRecorder records, and 15 minutes of nothing
+// reaches the researcher with no warning. We DETECT a silent input stream and
+// WARN the participant (non-blocking: recording always continues).
+//
+// Detection runs a Web Audio AnalyserNode over the live track and computes RMS
+// in dBFS over a short window. The decision is a pure function so it can be
+// unit-tested without a real AudioContext.
+
+// Threshold rationale (dBFS, full-scale = 0):
+//   - True failure is essentially digital silence: every sample ~0, so RMS is
+//     -Infinity (or, with analyser float error, well below -80 dB).
+//   - Confirmed-real speech in our captured data sits around -36 dB RMS.
+//   - Quiet-but-present speech (a soft talker) sits around -40 to -50 dB.
+// We set the bar at -60 dB: only treat the stream as silent when RMS is
+// effectively zero. A -50 dB quiet voice is a full 10 dB ABOVE the line and
+// will never trip it, so we never falsely stop a real (quiet) participant.
+// This is deliberately conservative per the product decision: warn, never
+// block, and never false-positive on a real voice.
+const SILENCE_RMS_DB_THRESHOLD = -60
+
+// dBFS for a fully-silent (all-zero) window is -Infinity. Floor it to a finite
+// value so the pure decision function stays total and testable.
+const SILENCE_FLOOR_DB = -100
+
+// How long the analyser must read continuous silence before we surface the
+// warning. ~1.8s at record start and as the sustained-silence window during
+// recording. Long enough that a natural pause between sentences (which dips
+// toward the floor for a fraction of a second) never trips it; short enough
+// that a dead device is flagged almost immediately.
+const SILENCE_SUSTAINED_MS = 1800
+
+// How often the monitor samples the analyser.
+const SILENCE_POLL_MS = 250
+
+// Compute RMS in dBFS from normalized float time-domain samples (each in
+// [-1, 1], as produced by AnalyserNode.getFloatTimeDomainData). Returns a
+// finite dB value floored at SILENCE_FLOOR_DB so an all-zero window doesn't
+// yield -Infinity. Pure, no Web Audio needed: unit-tested directly.
+export function rmsDbFromSamples(samples: Float32Array | number[]): number {
+	const n = samples.length
+	if (n === 0) return SILENCE_FLOOR_DB
+	let sumSquares = 0
+	for (let i = 0; i < n; i += 1) {
+		const s = samples[i] ?? 0
+		sumSquares += s * s
+	}
+	const rms = Math.sqrt(sumSquares / n)
+	if (rms <= 0) return SILENCE_FLOOR_DB
+	const db = 20 * Math.log10(rms)
+	return db < SILENCE_FLOOR_DB ? SILENCE_FLOOR_DB : db
+}
+
+// Pure silence decision. Accepts EITHER an already-computed RMS dB value (a
+// number) OR a sample window (array). True only when the level is at/below the
+// conservative silence threshold. A real voice, even a quiet one (-40 to
+// -50 dB), is comfortably above the line and returns false.
+export function isStreamSilent(input: number | Float32Array | number[]): boolean {
+	const rmsDb = typeof input === 'number' ? input : rmsDbFromSamples(input)
+	return rmsDb <= SILENCE_RMS_DB_THRESHOLD
+}
+
+// Live monitor: wires an AnalyserNode onto the stream and polls it. Calls
+// `onChange(silent)` only on transitions (silent <-> audible), debounced by
+// SILENCE_SUSTAINED_MS so a brief between-words dip never flips the pill.
+// Returns a teardown that closes the AudioContext and disconnects nodes.
+interface SilenceMonitor {
+	stop(): void
+}
+
+function startSilenceMonitor(stream: MediaStream, onChange: (silent: boolean) => void, logger: PluginContext['logger']): SilenceMonitor | null {
+	const Ctor: typeof AudioContext | undefined =
+		typeof window !== 'undefined'
+			? (window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext)
+			: undefined
+	if (!Ctor) return null
+
+	let audioCtx: AudioContext
+	let source: MediaStreamAudioSourceNode
+	let analyser: AnalyserNode
+	try {
+		audioCtx = new Ctor()
+		source = audioCtx.createMediaStreamSource(stream)
+		analyser = audioCtx.createAnalyser()
+		analyser.fftSize = 2048
+		// We do not connect the analyser to audioCtx.destination: we only READ
+		// the track, never play it back (that would echo the participant's own
+		// mic into their speakers).
+		source.connect(analyser)
+	} catch (err) {
+		logger.warn('silence monitor: failed to attach analyser', err)
+		return null
+	}
+
+	const buffer = new Float32Array(analyser.fftSize)
+	// Reported state (what the pill currently shows). Starts audible; we only
+	// flip to silent after SILENCE_SUSTAINED_MS of continuous silence.
+	let reportedSilent = false
+	// Timestamp the CURRENT run of same-classification readings began.
+	let runStartedAt = Date.now()
+	let lastRaw = false
+	let intervalId: ReturnType<typeof setInterval> | null = null
+
+	const tick = (): void => {
+		// getFloatTimeDomainData is widely supported; guard for older engines.
+		try {
+			analyser.getFloatTimeDomainData(buffer)
+		} catch {
+			return
+		}
+		const rawSilent = isStreamSilent(buffer)
+		const now = Date.now()
+		if (rawSilent !== lastRaw) {
+			lastRaw = rawSilent
+			runStartedAt = now
+		}
+		// Only commit a state change once the raw classification has held for
+		// the sustained window. Going audible clears the warning immediately
+		// once sustained, going silent raises it once sustained.
+		if (rawSilent !== reportedSilent && now - runStartedAt >= SILENCE_SUSTAINED_MS) {
+			reportedSilent = rawSilent
+			onChange(reportedSilent)
+		}
+	}
+
+	intervalId = setInterval(tick, SILENCE_POLL_MS)
+
+	return {
+		stop(): void {
+			if (intervalId !== null) {
+				clearInterval(intervalId)
+				intervalId = null
+			}
+			try {
+				source.disconnect()
+				analyser.disconnect()
+			} catch {
+				// nodes may already be torn down
+			}
+			// close() returns a promise; failures here are harmless (context may
+			// already be closing on page unload).
+			try {
+				void audioCtx.close()
+			} catch {
+				// ignore
+			}
+		},
+	}
+}
+
 async function startRecording(store: RecorderStore, ctx: PluginContext): Promise<void> {
 	// Re-entrant: the failed chip re-invokes this to retry. Reset to the
 	// pending state so the chip shows "connecting" again during the attempt.
 	store.micAcquiring = true
 	store.micFailReason = null
+	// A retry tears down a prior monitor and clears the silent flag so the
+	// fresh attempt starts from a clean state.
+	if (store.silenceMonitor) {
+		store.silenceMonitor.stop()
+		store.silenceMonitor = null
+	}
+	store.micSilent = false
 	renderIndicatorState(store)
 	if (!isMediaRecorderSupported()) {
 		ctx.logger.warn('MediaRecorder not supported, continuing without audio')
@@ -1830,6 +2018,25 @@ async function startRecording(store: RecorderStore, ctx: PluginContext): Promise
 		store.indicatorState = 'recording'
 	}
 	renderIndicatorState(store)
+
+	// Start the silent-mic guard over the live track. Detects a dead or virtual
+	// silent input at record start and keeps checking for a mid-session mic
+	// death. Warning only; recording is never gated on it. When the participant
+	// has muted themselves the track is intentionally silent, so we suppress the
+	// warning in that case (see the onChange guard).
+	const monitor = startSilenceMonitor(
+		stream,
+		silent => {
+			// Ignore the analyser while the participant has deliberately muted:
+			// a muted track reads as silence by design, that's not a fault.
+			const effectiveSilent = silent && !store.muted
+			if (store.micSilent === effectiveSilent) return
+			store.micSilent = effectiveSilent
+			renderIndicatorState(store)
+		},
+		ctx.logger,
+	)
+	store.silenceMonitor = monitor
 }
 
 function toggleMute(store: RecorderStore): boolean {
@@ -1867,6 +2074,11 @@ function flushMuteIfActive(store: RecorderStore): void {
 }
 
 function stopRecording(store: RecorderStore): void {
+	if (store.silenceMonitor) {
+		store.silenceMonitor.stop()
+		store.silenceMonitor = null
+	}
+	store.micSilent = false
 	const recorder = store.recorder
 	if (recorder && recorder.state !== 'inactive') {
 		try {
@@ -2033,6 +2245,8 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				muted: false,
 				mutedSinceMs: null,
 				mutedSegments: [],
+				micSilent: false,
+				silenceMonitor: null,
 				muteToastShown: false,
 				muteToastTimers: [],
 				notes: [],
@@ -2067,9 +2281,23 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 					}
 					return
 				}
+				// Silent-mic warning is also a retry affordance: the participant
+				// has likely switched their input device, so re-acquire the mic
+				// rather than toggling mute. startRecording tears down the old
+				// stream + monitor and re-runs detection on the fresh track.
+				if (store.micSilent && !store.micAcquiring && store.indicatorState !== 'finishing' && store.indicatorState !== 'done' && store.indicatorState !== 'error') {
+					void startRecording(store, ctx)
+					return
+				}
 				const ok = toggleMute(store)
 				if (!ok) return
-				if (store.muted) showMuteToast(store)
+				if (store.muted) {
+					// Muting is intentional silence: drop any active silent-mic
+					// warning so the two states don't fight. The monitor's
+					// onChange suppresses re-raising it while muted.
+					store.micSilent = false
+					showMuteToast(store)
+				}
 				renderIndicatorState(store)
 			}
 
@@ -2241,4 +2469,13 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 }
 
 // Internal helpers exposed for tests only. Not part of the public API.
-export const __test__ = { getTestSlug, pickMimeType, isMediaRecorderSupported, micChipState }
+export const __test__ = {
+	getTestSlug,
+	pickMimeType,
+	isMediaRecorderSupported,
+	micChipState,
+	isStreamSilent,
+	rmsDbFromSamples,
+	SILENCE_RMS_DB_THRESHOLD,
+	SILENCE_FLOOR_DB,
+}
