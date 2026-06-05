@@ -56,6 +56,13 @@ export interface PluginContext {
 	// (clientId + sdkSessionId), so any plugin that wants to point at the
 	// tab's recording sends this.
 	getSdkSessionId?: () => string
+	// Force the per-tab sdkSessionId to a specific value. ONLY the user-test
+	// resume path uses this: a cross-origin hard navigation wipes sessionStorage,
+	// so on resume user-test re-seats the durable id (from its own localStorage)
+	// before session-replay reads it, keeping the post-nav replay row joined to
+	// the same audio session. No-ops on a malformed id. Optional so older hosts
+	// and test doubles that predate it still satisfy the contract.
+	reseatSdkSessionId?: (id: string) => void
 	// Per-browser id (localStorage `usero:anonymous-id`) for cross-session
 	// stitching.
 	getAnonymousId?: () => string

@@ -15,10 +15,12 @@ import {
 	getCurrentUserId,
 	getOrMintAnonymousId,
 	getOrMintSdkSessionId,
+	reseatSdkSessionId,
 	getReplayStartMs,
 	handleLogout as identityHandleLogout,
 	identifyIfChanged,
 	publishReplayStartMs,
+	__test__ as identityTestHooks,
 } from './identity'
 import {
 	createPluginLogger,
@@ -49,6 +51,12 @@ export {
 	DEFAULT_THEME,
 	mergeTheme,
 }
+
+// Test-only re-export of the identity module's internal hooks (identity.ts is
+// bundled into this entry, so it has no standalone dist file to import from).
+// Not part of the public API; used by tests/identity-sdk-session.test.mjs to
+// exercise reseatSdkSessionId, the resume-across-hard-nav replay-link fix.
+export const __identityTest__ = identityTestHooks
 
 // Pick the base theme to merge user overrides onto, based on the OS color
 // scheme. Defaults to dark when matchMedia is unavailable (SSR, old browsers)
@@ -321,6 +329,7 @@ export function initUseroFeedbackWidget(
 			// source of truth in identity.ts, so user-test and session-replay
 			// agree on the per-tab sdkSessionId without importing each other.
 			getSdkSessionId: () => getOrMintSdkSessionId(),
+			reseatSdkSessionId: (id: string) => reseatSdkSessionId(id),
 			getAnonymousId: () => getOrMintAnonymousId(),
 			getUserId: () => getCurrentUserId(),
 			getReplayStartMs: () => getReplayStartMs(),

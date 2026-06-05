@@ -137,6 +137,13 @@ interface RecorderStore {
 	// (a resume across a hard navigation) rather than a fresh start. Lets the
 	// init path skip session creation/adoption and continue the chunk index.
 	resumed: boolean
+	// The per-tab sdkSessionId for this session, resolved once at session start
+	// from the core (ctx.getSdkSessionId). Mirrored into the localStorage resume
+	// state so a hard nav can re-seat it and keep the replay link intact, and
+	// sent on every finalise so the (clientId, sdkSessionId) join resolves even
+	// after resume. Null when replay is not active / the host predates the core
+	// accessor.
+	sdkSessionId: string | null
 	// Offset (ms) into the session-replay recording at the moment THIS
 	// user-test session started. Captured once at start (not at finalise)
 	// so it pins the test timeline to the recording timeline. Null when no
@@ -189,6 +196,13 @@ interface ActiveSessionState {
 	nextChunkIndex: number
 	startedAt: number
 	status: 'active' | 'paused'
+	// The per-tab sdkSessionId at the time recording started. Durably mirrored
+	// here (localStorage survives a cross-origin hard nav; sessionStorage does
+	// not) so the post-nav document can re-seat the SAME id and the resumed
+	// SessionReplay row stays joined to this audio session via the server's
+	// (clientId, sdkSessionId) match. Optional: absent when replay was not active
+	// (nothing to keep linked), or when an older SDK wrote the entry.
+	sdkSessionId?: string
 }
 
 function parseActiveSession(raw: unknown): ActiveSessionState | null {
@@ -199,13 +213,26 @@ function parseActiveSession(raw: unknown): ActiveSessionState | null {
 		nextChunkIndex?: unknown
 		startedAt?: unknown
 		status?: unknown
+		sdkSessionId?: unknown
 	}
 	if (typeof s.slug !== 'string' || !s.slug) return null
 	if (typeof s.sessionId !== 'string' || !s.sessionId) return null
 	if (typeof s.nextChunkIndex !== 'number' || !Number.isInteger(s.nextChunkIndex) || s.nextChunkIndex < 0) return null
 	if (typeof s.startedAt !== 'number' || !Number.isFinite(s.startedAt)) return null
 	const status = s.status === 'paused' ? 'paused' : 'active'
-	return { slug: s.slug, sessionId: s.sessionId, nextChunkIndex: s.nextChunkIndex, startedAt: s.startedAt, status }
+	const result: ActiveSessionState = {
+		slug: s.slug,
+		sessionId: s.sessionId,
+		nextChunkIndex: s.nextChunkIndex,
+		startedAt: s.startedAt,
+		status,
+	}
+	// Loose sanity filter, same shape the core uses for the id. A bad value is
+	// dropped (resume still works for audio, only the replay link is at risk).
+	if (typeof s.sdkSessionId === 'string' && /^[a-z0-9-]{8,}$/i.test(s.sdkSessionId)) {
+		result.sdkSessionId = s.sdkSessionId
+	}
+	return result
 }
 
 // Read the persisted active session for this origin, or null when absent,
@@ -248,13 +275,15 @@ function clearActiveSession(): void {
 // starts and after the chunk index advances. No-op until the session id exists.
 function persistActiveSession(store: RecorderStore, status: 'active' | 'paused'): void {
 	if (!store.sessionId) return
-	writeActiveSession({
+	const state: ActiveSessionState = {
 		slug: store.slug,
 		sessionId: store.sessionId,
 		nextChunkIndex: store.chunkIndex,
 		startedAt: store.startedAt,
 		status,
-	})
+	}
+	if (store.sdkSessionId) state.sdkSessionId = store.sdkSessionId
+	writeActiveSession(state)
 }
 
 interface PendingChunk {
@@ -2380,6 +2409,20 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 			if (!slug) return
 			const isResume = resumable !== null
 
+			// CRITICAL replay-link fix: re-seat the per-tab sdkSessionId from the
+			// durable resume state SYNCHRONOUSLY, before anything else. A cross-origin
+			// hard nav wiped sessionStorage, so without this the resumed session-replay
+			// plugin would mint a NEW sdkSessionId; the post-nav replay row would then
+			// no longer share an id with this audio session, the finalise
+			// (clientId, sdkSessionId) join would miss, and the dashboard would hide a
+			// perfectly-recorded replay. reseatSdkSessionId writes sessionStorage AND
+			// the core cache, so it corrects the id whether session-replay's onInit
+			// runs after this (reads the re-seated value) or already ran (cache fixed,
+			// and its own finalise reads through the cache). No-ops on a bad/absent id.
+			if (isResume && resumable?.sdkSessionId && ctx.reseatSdkSessionId) {
+				ctx.reseatSdkSessionId(resumable.sdkSessionId)
+			}
+
 			const apiUrl = merged.apiUrl || ctx.baseUrl || DEFAULT_API_URL
 			const store: RecorderStore = {
 				cancelled: false,
@@ -2422,6 +2465,7 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				endNote: '',
 				finishFlowRan: false,
 				resumed: isResume,
+				sdkSessionId: null,
 				replayOffsetAtStartMs: null,
 			}
 			ctx.setStore(store)
@@ -2586,9 +2630,16 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				}
 				store.sessionId = created.sessionId
 				store.clientId = created.clientId
+				// Resolve the per-tab sdkSessionId now (once) so it can be durably
+				// mirrored into the resume state and sent on finalise. On resume this
+				// is the SAME id we re-seated synchronously above (so the post-nav
+				// replay row joins this audio session); on a fresh start it is the
+				// tab's id. Null when replay/core accessor is absent (no link to keep).
+				store.sdkSessionId = ctx.getSdkSessionId ? ctx.getSdkSessionId() : null
 				// Persist (or refresh) the resume pointer now that we have a session
-				// id, BEFORE the first chunk flushes, so a hard navigation in the
-				// first few seconds of recording still resumes.
+				// id (and the sdkSessionId), BEFORE the first chunk flushes, so a hard
+				// navigation in the first few seconds of recording still resumes AND
+				// keeps the replay link.
 				persistActiveSession(store, 'active')
 				// Capture the replay offset HERE at session start (not at
 				// finalise) so it reflects when the test began relative to the

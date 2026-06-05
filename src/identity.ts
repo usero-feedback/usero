@@ -162,6 +162,31 @@ export function getOrMintSdkSessionId(): string {
 }
 
 /**
+ * Re-seat the per-tab sdkSessionId to a specific value. Used ONLY by the
+ * user-test resume path: a cross-origin hard navigation (e.g. an OAuth round
+ * trip) wipes sessionStorage, so the post-nav document would mint a NEW
+ * sdkSessionId and the post-nav SessionReplay row would no longer share an id
+ * with the audio session, breaking the (clientId, sdkSessionId) finalise join.
+ *
+ * The user-test plugin durably persists the original id in its localStorage
+ * resume state (which survives the round trip) and calls this synchronously at
+ * the very top of its onInit, BEFORE the session-replay plugin reads the id,
+ * so the resumed replay reuses the SAME id and the server stitches both replay
+ * rows under it.
+ *
+ * No-ops on a malformed id (so a corrupted resume entry can never poison the
+ * tab's id) and on an id identical to the current one. Writes sessionStorage
+ * AND the in-memory cache so a replay onInit that already cached a fresh mint
+ * is corrected (the cache is the read-through path).
+ */
+export function reseatSdkSessionId(id: string): void {
+	if (!/^[a-z0-9-]{8,}$/i.test(id)) return
+	if (cachedSdkSessionId === id) return
+	cachedSdkSessionId = id
+	safeWriteSessionStorage(SDK_SESSION_STORAGE_KEY, id)
+}
+
+/**
  * The current resolved external user id, or null if no identify has
  * succeeded this session (or after logout). Set by the identify
  * pipeline; read by plugins that want the current identity without
@@ -309,6 +334,8 @@ export function handleLogout(): void {
 export const __test__ = {
 	ANON_STORAGE_KEY,
 	SDK_SESSION_STORAGE_KEY,
+	reseatSdkSessionId,
+	getOrMintSdkSessionId,
 	resetIdentityState: (): void => {
 		cachedAnonymousId = null
 		cachedSdkSessionId = null

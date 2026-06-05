@@ -25,6 +25,30 @@ test('parseActiveSession: accepts a well-formed active entry', () => {
 	assert.deepEqual(parseActiveSession(state), state)
 })
 
+test('parseActiveSession: round-trips a valid sdkSessionId (replay-link key)', () => {
+	const state = {
+		slug: 'checkout-flow',
+		sessionId: 'abc123',
+		nextChunkIndex: 2,
+		startedAt: 1_700_000_000_000,
+		status: 'paused',
+		sdkSessionId: 'a1b2c3d4-aaaa-bbbb',
+	}
+	assert.deepEqual(parseActiveSession(state), state)
+})
+
+test('parseActiveSession: drops a malformed sdkSessionId but still resumes audio', () => {
+	const parsed = parseActiveSession({
+		slug: 's',
+		sessionId: 'id',
+		nextChunkIndex: 0,
+		startedAt: 1,
+		sdkSessionId: 'no', // too short for the sanity filter
+	})
+	assert.ok(parsed, 'entry still parses (audio resume must not depend on the link)')
+	assert.equal(parsed.sdkSessionId, undefined)
+})
+
 test('parseActiveSession: defaults unknown status to active', () => {
 	const parsed = parseActiveSession({
 		slug: 's',
