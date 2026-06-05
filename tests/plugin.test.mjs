@@ -19,6 +19,9 @@ const {
 	createSession,
 	scheduleChunkUpload,
 	maybeIsolateSnapshot,
+	startUrlChangeTracking,
+	stopUrlChangeTracking,
+	URL_CHANGE_TAG,
 	RRWEB_EVENT_TYPE_FULL_SNAPSHOT,
 	SNAPSHOT_ISOLATION_MIN_GAP_MS,
 	HARD_CHUNK_BYTE_CAP,
@@ -312,6 +315,7 @@ function makeStore(overrides = {}) {
 		shadowUpdateHandler: null,
 		record: null,
 		stopRecording: null,
+		stopUrlTracking: null,
 		loadInProgress: false,
 		cancelled: false,
 		stopped: false,
@@ -571,4 +575,157 @@ test('scheduleChunkUpload: resets pendingBytes after handoff', async () => {
 	assert.equal(store.nextChunkSeq, 1)
 	await store.uploadQueue
 	assert.equal(store.pendingUploads, 0)
+})
+
+// ---- SPA URL-change capture ----
+
+// Stubs window.history + window.location + popstate listening so we can
+// exercise startUrlChangeTracking without jsdom. Returns helpers to read the
+// patched/original state and drive navigations.
+function installUrlEnv(initialHref = 'https://app.example/start') {
+	let href = initialHref
+	const popstateListeners = []
+	const originalPushState = function originalPushState() {}
+	const originalReplaceState = function originalReplaceState() {}
+	const history = {
+		pushState: originalPushState,
+		replaceState: originalReplaceState,
+	}
+	const win = {
+		get history() {
+			return history
+		},
+		location: {
+			get href() {
+				return href
+			},
+		},
+		addEventListener(type, fn) {
+			if (type === 'popstate') popstateListeners.push(fn)
+		},
+		removeEventListener(type, fn) {
+			if (type !== 'popstate') return
+			const i = popstateListeners.indexOf(fn)
+			if (i >= 0) popstateListeners.splice(i, 1)
+		},
+	}
+	Object.defineProperty(globalThis, 'window', { value: win, configurable: true, writable: true })
+	return {
+		history,
+		originalPushState,
+		originalReplaceState,
+		setHref: (v) => {
+			href = v
+		},
+		firePopstate: () => popstateListeners.forEach((fn) => fn()),
+		popstateCount: () => popstateListeners.length,
+	}
+}
+
+// A minimal record fn whose addCustomEvent records every call.
+function makeRecordWithCustomEvents() {
+	const calls = []
+	const record = () => () => {}
+	record.addCustomEvent = (tag, payload) => calls.push({ tag, payload })
+	return { record, calls }
+}
+
+test('startUrlChangeTracking: emits an immediate url-change anchor on start', () => {
+	const env = installUrlEnv('https://app.example/home')
+	const { record, calls } = makeRecordWithCustomEvents()
+	const store = makeStore({ record })
+	const { ctx } = makeCtx()
+	startUrlChangeTracking(store, ctx)
+	assert.equal(calls.length, 1, 'one immediate anchor emit')
+	assert.equal(calls[0].tag, URL_CHANGE_TAG)
+	assert.deepEqual(calls[0].payload, { href: 'https://app.example/home' })
+	stopUrlChangeTracking(store)
+})
+
+test('startUrlChangeTracking: pushState fires addCustomEvent with the new href', () => {
+	const env = installUrlEnv('https://app.example/home')
+	const { record, calls } = makeRecordWithCustomEvents()
+	const store = makeStore({ record })
+	const { ctx } = makeCtx()
+	startUrlChangeTracking(store, ctx)
+	calls.length = 0 // drop the immediate anchor
+	env.setHref('https://app.example/settings')
+	window.history.pushState({}, '', '/settings')
+	assert.equal(calls.length, 1)
+	assert.equal(calls[0].tag, URL_CHANGE_TAG)
+	assert.deepEqual(calls[0].payload, { href: 'https://app.example/settings' })
+	stopUrlChangeTracking(store)
+})
+
+test('startUrlChangeTracking: replaceState and popstate both emit url-change', () => {
+	const env = installUrlEnv('https://app.example/a')
+	const { record, calls } = makeRecordWithCustomEvents()
+	const store = makeStore({ record })
+	const { ctx } = makeCtx()
+	startUrlChangeTracking(store, ctx)
+	calls.length = 0
+	env.setHref('https://app.example/b')
+	window.history.replaceState({}, '', '/b')
+	env.setHref('https://app.example/c')
+	env.firePopstate()
+	assert.deepEqual(
+		calls.map((c) => c.payload.href),
+		['https://app.example/b', 'https://app.example/c'],
+	)
+	stopUrlChangeTracking(store)
+})
+
+test('startUrlChangeTracking: is a no-op if already tracking (no double-patch)', () => {
+	const env = installUrlEnv()
+	const { record } = makeRecordWithCustomEvents()
+	const store = makeStore({ record })
+	const { ctx } = makeCtx()
+	startUrlChangeTracking(store, ctx)
+	const patchedPush = window.history.pushState
+	const teardown = store.stopUrlTracking
+	startUrlChangeTracking(store, ctx)
+	assert.equal(window.history.pushState, patchedPush, 'pushState not re-patched')
+	assert.equal(store.stopUrlTracking, teardown, 'teardown reference unchanged')
+	stopUrlChangeTracking(store)
+})
+
+test('stopUrlChangeTracking: restores original history methods and removes listener', () => {
+	const env = installUrlEnv()
+	const { record, calls } = makeRecordWithCustomEvents()
+	const store = makeStore({ record })
+	const { ctx } = makeCtx()
+	startUrlChangeTracking(store, ctx)
+	assert.notEqual(window.history.pushState, env.originalPushState, 'pushState patched while live')
+	assert.equal(env.popstateCount(), 1, 'popstate listener registered')
+	stopUrlChangeTracking(store)
+	assert.equal(window.history.pushState, env.originalPushState, 'pushState restored')
+	assert.equal(window.history.replaceState, env.originalReplaceState, 'replaceState restored')
+	assert.equal(env.popstateCount(), 0, 'popstate listener removed')
+	assert.equal(store.stopUrlTracking, null, 'teardown reference cleared')
+	// After teardown, history navigations no longer emit.
+	calls.length = 0
+	window.history.pushState({}, '', '/x')
+	assert.equal(calls.length, 0, 'no emit after teardown')
+})
+
+test('startUrlChangeTracking: no-op when record lacks addCustomEvent', () => {
+	installUrlEnv()
+	const record = () => () => {}
+	const store = makeStore({ record })
+	const { ctx } = makeCtx()
+	startUrlChangeTracking(store, ctx)
+	assert.equal(store.stopUrlTracking, null, 'no teardown wired when addCustomEvent missing')
+})
+
+test('startUrlChangeTracking: does not emit once store is stopped', () => {
+	installUrlEnv()
+	const { record, calls } = makeRecordWithCustomEvents()
+	const store = makeStore({ record })
+	const { ctx } = makeCtx()
+	startUrlChangeTracking(store, ctx)
+	calls.length = 0
+	store.stopped = true
+	window.history.pushState({}, '', '/y')
+	assert.equal(calls.length, 0, 'stopped store suppresses url-change emits')
+	stopUrlChangeTracking(store)
 })

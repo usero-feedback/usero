@@ -104,6 +104,12 @@ interface RrwebRecordOptions {
 interface RrwebRecordFn {
 	(opts: RrwebRecordOptions): () => void
 	takeFullSnapshot?: (isCheckout?: boolean) => void
+	// rrweb wraps the payload as an EventType.Custom (type 5) event with
+	// `data: { tag, payload }` and emits it through the same `emit` callback
+	// as every other rrweb event, so it streams in our chunks alongside Meta
+	// (type 4) and incremental (type 3) events. Consumers reading the stream
+	// resolve the URL-at-moment from these `tag === 'url-change'` events.
+	addCustomEvent?: (tag: string, payload: unknown) => void
 }
 
 type RrwebRecord = RrwebRecordFn
@@ -155,6 +161,10 @@ interface ReplayStore {
 	shadowUpdateHandler: ((event: Event) => void) | null
 	record: RrwebRecord | null
 	stopRecording: (() => void) | null
+	// Teardown for the SPA URL-change tracker: restores the patched
+	// history.pushState / history.replaceState and removes the popstate
+	// listener. Null until tracking is wired up, and after teardown.
+	stopUrlTracking: (() => void) | null
 	loadInProgress: boolean
 	cancelled: boolean
 	// True once the session is "done": bot-gated, finalised, or destroyed.
@@ -538,6 +548,10 @@ function flushPendingChunk(store: ReplayStore, ctx: PluginContext): void {
 }
 
 function stopRrweb(store: ReplayStore): void {
+	// Restore patched history methods + remove popstate listener before we
+	// drop the record reference, so the SPA URL-change patch never outlives
+	// the recording.
+	stopUrlChangeTracking(store)
 	if (store.stopRecording) {
 		try {
 			store.stopRecording()
@@ -549,6 +563,105 @@ function stopRrweb(store: ReplayStore): void {
 	if (store.chunkFlushTimer) {
 		clearInterval(store.chunkFlushTimer)
 		store.chunkFlushTimer = null
+	}
+}
+
+// rrweb tag for SPA URL-change custom events. Consumers (replay viewer, AI
+// analysis) key off this exact string inside type-5 Custom events to resolve
+// the URL the user was on at any moment, not just the initial Meta (type 4)
+// href captured at recording start.
+const URL_CHANGE_TAG = 'url-change'
+
+// Captures client-side route changes (history.pushState / replaceState /
+// popstate) as rrweb custom events so the replay stream carries the URL after
+// the initial page load. rrweb only emits a Meta event with the URL at
+// recording START, so without this every SPA navigation is invisible in the
+// recording.
+//
+// Patches the two history methods by wrapping the originals (call through,
+// then emit) and listens for popstate. Emits once immediately so the current
+// SPA URL is anchored. Returns a teardown that restores the original methods
+// and removes the listener, so the patch never leaks across the widget's
+// lifecycle. Re-entrancy is guarded by `store.stopUrlTracking`: if tracking is
+// already wired up, this is a no-op (prevents double-patching if the plugin
+// inits more than once on the same page).
+//
+// All work is wrapped so a history-patch failure (locked-down history object,
+// frozen prototype) never breaks recording: it logs and leaves recording
+// untouched.
+function startUrlChangeTracking(store: ReplayStore, ctx: PluginContext): void {
+	if (typeof window === 'undefined') return
+	if (store.stopUrlTracking) return
+	const record = store.record
+	const addCustomEvent = record?.addCustomEvent
+	if (!record || typeof addCustomEvent !== 'function') return
+
+	const emitUrl = (): void => {
+		if (store.stopped || store.cancelled) return
+		try {
+			addCustomEvent.call(record, URL_CHANGE_TAG, { href: window.location.href })
+		} catch (err) {
+			ctx.logger.warn('url-change addCustomEvent threw', err)
+		}
+	}
+
+	try {
+		const history = window.history
+		const originalPushState = history.pushState
+		const originalReplaceState = history.replaceState
+
+		const patchedPushState: History['pushState'] = function patchedPushState(
+			this: History,
+			...args
+		) {
+			const result = originalPushState.apply(this, args)
+			emitUrl()
+			return result
+		}
+		const patchedReplaceState: History['replaceState'] = function patchedReplaceState(
+			this: History,
+			...args
+		) {
+			const result = originalReplaceState.apply(this, args)
+			emitUrl()
+			return result
+		}
+
+		history.pushState = patchedPushState
+		history.replaceState = patchedReplaceState
+
+		const onPopState = (): void => emitUrl()
+		window.addEventListener('popstate', onPopState)
+
+		store.stopUrlTracking = (): void => {
+			try {
+				// Only restore if nothing else re-patched on top of us, so we
+				// don't clobber a later wrapper (e.g. the host's own router
+				// instrumentation) by reverting to a stale original.
+				if (history.pushState === patchedPushState) history.pushState = originalPushState
+				if (history.replaceState === patchedReplaceState) {
+					history.replaceState = originalReplaceState
+				}
+				window.removeEventListener('popstate', onPopState)
+			} catch (err) {
+				ctx.logger.warn('url-change teardown threw', err)
+			}
+		}
+
+		// Anchor the current SPA URL immediately. Meta also carries it at
+		// start, but this keeps the resolver logic uniform (always read the
+		// latest url-change event) and covers hosts that delay the first
+		// route render.
+		emitUrl()
+	} catch (err) {
+		ctx.logger.warn('url-change tracking setup threw', err)
+	}
+}
+
+function stopUrlChangeTracking(store: ReplayStore): void {
+	if (store.stopUrlTracking) {
+		store.stopUrlTracking()
+		store.stopUrlTracking = null
 	}
 }
 
@@ -604,6 +717,9 @@ function startRecording(store: ReplayStore, ctx: PluginContext): void {
 			})
 			store.stopRecording = stop
 			store.record = record
+			// Capture SPA route changes as custom events so the replay stream
+			// knows the URL after the first page load.
+			startUrlChangeTracking(store, ctx)
 			scheduleShadowSnapshot(store, ctx)
 
 			store.chunkFlushTimer = setInterval(
@@ -711,6 +827,7 @@ export function sessionReplay(options: SessionReplayOptions = {}): UseroPlugin {
 				shadowUpdateHandler: null,
 				record: null,
 				stopRecording: null,
+				stopUrlTracking: null,
 				loadInProgress: false,
 				cancelled: false,
 				stopped: false,
@@ -873,6 +990,9 @@ export const __test__ = {
 	joinUrl,
 	scheduleChunkUpload,
 	maybeIsolateSnapshot,
+	startUrlChangeTracking,
+	stopUrlChangeTracking,
+	URL_CHANGE_TAG,
 	RRWEB_EVENT_TYPE_FULL_SNAPSHOT,
 	SNAPSHOT_ISOLATION_MIN_GAP_MS,
 	HARD_CHUNK_BYTE_CAP,
