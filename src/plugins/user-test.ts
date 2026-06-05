@@ -9,8 +9,23 @@
 //      PUT /api/user-test-sessions/:id/chunk?index=N
 //   3. Renders a small floating "recording" indicator with a Finish button
 //      bottom-center so the tester can stop on their own.
-//   4. On Finish (or `pagehide` / `visibilitychange` -> hidden), flushes any
-//      buffered chunks and calls POST /api/user-test-sessions/:id/finalise.
+//   4. On Finish, flushes any buffered chunks and calls
+//      POST /api/user-test-sessions/:id/finalise.
+//
+// Resume across hard navigations: `pagehide` / `visibilitychange -> hidden` now
+// PAUSE rather than finalise. The recorder stops and queued chunks drain on
+// `keepalive`, but the session stays open server-side. Resume state
+// ({ slug, sessionId, nextChunkIndex, startedAt }) is persisted per-origin in
+// localStorage (`usero:user-test:active-session`). On init, a non-stale entry
+// (< 2h old) makes the plugin re-adopt that session and continue recording from
+// nextChunkIndex, even when the URL no longer carries `?usero_test`/`uts` (e.g.
+// after an OAuth round-trip). The mic permission is already granted on the same
+// origin, so no second prompt. The rrweb DOM recorder resumes on its own: the
+// session-replay plugin re-inits on the fresh document, reuses the same
+// sdkSessionId from sessionStorage, and the server stitches the replay across
+// the gap. Finalisation comes only from an explicit Finish or the server-side
+// stale-session sweep (~10 min of no chunks); see recoverStuckUserTestSessions
+// in the feedback repo.
 //
 // Mic-permission denied is non-fatal: the session is still created (the
 // session-replay plugin keeps recording in parallel) and the indicator
@@ -118,6 +133,10 @@ interface RecorderStore {
 	endNote: string
 	// Re-entry guard for finishFlow.
 	finishFlowRan: boolean
+	// True when this store was rehydrated from persisted localStorage state
+	// (a resume across a hard navigation) rather than a fresh start. Lets the
+	// init path skip session creation/adoption and continue the chunk index.
+	resumed: boolean
 	// Offset (ms) into the session-replay recording at the moment THIS
 	// user-test session started. Captured once at start (not at finalise)
 	// so it pins the test timeline to the recording timeline. Null when no
@@ -144,8 +163,99 @@ const DEFAULT_OPTIONS: Required<Omit<UserTestOptions, 'testerName' | 'apiUrl'>> 
 
 const TESTER_NAME_STORAGE_KEY = 'usero:user-test:tester-name'
 const TASKS_PANEL_OPEN_STORAGE_KEY = 'usero:user-test:tasks-panel-open'
+// Per-origin resume state. A single active user-test session per origin: the
+// participant can only be inside one test at a time, so we don't key by slug.
+// localStorage (not sessionStorage) so the entry survives a hard cross-origin
+// navigation away-and-back (e.g. an OAuth round-trip) within the same tab.
+const ACTIVE_SESSION_STORAGE_KEY = 'usero:user-test:active-session'
+// A persisted active session older than this is treated as stale and ignored on
+// init, so a long-abandoned entry can never silently start recording on an
+// unrelated later visit. Matches the spirit of the server-side stale sweep.
+const ACTIVE_SESSION_MAX_AGE_MS = 2 * 60 * 60 * 1000 // 2h
 const IDB_NAME = 'usero-user-test'
 const IDB_STORE = 'pending-chunks'
+
+// Persisted resume state. Written when recording starts and updated as the
+// chunk index advances; read on init to resume across a hard navigation.
+//   - `status`: 'active' while recording, 'paused' once the page hid mid-test.
+//     Both resume the same way; the flag is informational (and lets a future
+//     UI distinguish "came back from a pause" if it wants to).
+//   - `nextChunkIndex`: the chunk index the resumed recorder continues from.
+//     The server stitches chunks, and the container remux tolerates the extra
+//     WebM header the fresh post-resume recorder emits.
+interface ActiveSessionState {
+	slug: string
+	sessionId: string
+	nextChunkIndex: number
+	startedAt: number
+	status: 'active' | 'paused'
+}
+
+function parseActiveSession(raw: unknown): ActiveSessionState | null {
+	if (typeof raw !== 'object' || raw === null) return null
+	const s = raw as {
+		slug?: unknown
+		sessionId?: unknown
+		nextChunkIndex?: unknown
+		startedAt?: unknown
+		status?: unknown
+	}
+	if (typeof s.slug !== 'string' || !s.slug) return null
+	if (typeof s.sessionId !== 'string' || !s.sessionId) return null
+	if (typeof s.nextChunkIndex !== 'number' || !Number.isInteger(s.nextChunkIndex) || s.nextChunkIndex < 0) return null
+	if (typeof s.startedAt !== 'number' || !Number.isFinite(s.startedAt)) return null
+	const status = s.status === 'paused' ? 'paused' : 'active'
+	return { slug: s.slug, sessionId: s.sessionId, nextChunkIndex: s.nextChunkIndex, startedAt: s.startedAt, status }
+}
+
+// Read the persisted active session for this origin, or null when absent,
+// unparseable, or stale (> ACTIVE_SESSION_MAX_AGE_MS). Storage access is wrapped
+// because localStorage can throw in sandboxed iframes / lockdown modes; a throw
+// must never break the plugin (we just don't resume).
+function readActiveSession(): ActiveSessionState | null {
+	try {
+		const raw = window.localStorage?.getItem(ACTIVE_SESSION_STORAGE_KEY)
+		if (!raw) return null
+		const parsed = parseActiveSession(JSON.parse(raw))
+		if (!parsed) return null
+		if (Date.now() - parsed.startedAt > ACTIVE_SESSION_MAX_AGE_MS) {
+			clearActiveSession()
+			return null
+		}
+		return parsed
+	} catch {
+		return null
+	}
+}
+
+function writeActiveSession(state: ActiveSessionState): void {
+	try {
+		window.localStorage?.setItem(ACTIVE_SESSION_STORAGE_KEY, JSON.stringify(state))
+	} catch {
+		// Storage full / blocked: resume resilience is lost but recording continues.
+	}
+}
+
+function clearActiveSession(): void {
+	try {
+		window.localStorage?.removeItem(ACTIVE_SESSION_STORAGE_KEY)
+	} catch {
+		// ignore
+	}
+}
+
+// Persist the current store as the active resume state. Called when recording
+// starts and after the chunk index advances. No-op until the session id exists.
+function persistActiveSession(store: RecorderStore, status: 'active' | 'paused'): void {
+	if (!store.sessionId) return
+	writeActiveSession({
+		slug: store.slug,
+		sessionId: store.sessionId,
+		nextChunkIndex: store.chunkIndex,
+		startedAt: store.startedAt,
+		status,
+	})
+}
 
 interface PendingChunk {
 	id: string
@@ -1772,6 +1882,9 @@ function enqueueChunk(store: RecorderStore, ctx: PluginContext, blob: Blob): voi
 	if (store.cancelled || !store.sessionId || blob.size === 0) return
 	const index = store.chunkIndex
 	store.chunkIndex += 1
+	// Advance the persisted resume pointer so a hard navigation mid-recording
+	// resumes from the next index, never re-using one already shipped.
+	persistActiveSession(store, store.finishFlowRan ? 'paused' : 'active')
 	store.pendingUploads += 1
 	const sessionId = store.sessionId
 	const apiUrl = store.options.apiUrl
@@ -2099,6 +2212,31 @@ function stopRecording(store: RecorderStore): void {
 	}
 }
 
+// Pause the recording for a hard navigation (pagehide / tab hidden) WITHOUT
+// finalising. The browser is about to tear down the MediaStream, so we stop the
+// recorder and let its queued chunk uploads race the unload on `keepalive`. The
+// session stays open server-side; it resumes on return (storage carries the
+// resume pointer), or the server-side stale sweep finalises it after ~10 min if
+// the participant never comes back. This replaces the old pagehide->finalise,
+// which permanently closed a session the participant intended to continue.
+//
+// Idempotent + non-destructive: it does NOT set finishFlowRan or move the
+// indicator to a terminal state, so a real Finish tap after resume still works.
+// Safe to call repeatedly (stopRecording tolerates an already-stopped recorder).
+function pauseFlow(store: RecorderStore): void {
+	if (store.cancelled) return
+	// Already finishing/finished for real: nothing to pause.
+	if (store.finishFlowRan || store.indicatorState === 'finishing' || store.indicatorState === 'done') return
+	// No live session yet (still creating/adopting): nothing to persist or stop.
+	if (!store.sessionId) return
+	flushMuteIfActive(store)
+	stopRecording(store)
+	// Mark the persisted state paused at the current chunk index. The queued
+	// uploads (each `keepalive` where small enough) continue draining as the
+	// page unloads; the resume picks up from store.chunkIndex.
+	persistActiveSession(store, 'paused')
+}
+
 async function finishFlow(store: RecorderStore, ctx: PluginContext, opts: { showThanks: boolean }): Promise<void> {
 	if (store.cancelled) return
 	// Short-circuit re-entry. The pagehide handler and the manual Finish click
@@ -2152,6 +2290,11 @@ async function finishFlow(store: RecorderStore, ctx: PluginContext, opts: { show
 			}
 		}
 		store.indicatorState = result.ok ? 'done' : 'error'
+		// Genuine, server-confirmed finalisation: clear the persisted resume
+		// state so a later unrelated visit never tries to resume this closed
+		// session. On error we keep it so the resume / server stale sweep can
+		// still own the session.
+		if (result.ok) clearActiveSession()
 	} else {
 		store.indicatorState = 'error'
 	}
@@ -2175,6 +2318,9 @@ async function finishFlow(store: RecorderStore, ctx: PluginContext, opts: { show
 				store.startedAt = Date.now()
 				store.muted = false
 				store.mutedSinceMs = null
+				// Re-arm the persisted resume state: the participant chose to keep
+				// going, so a hard navigation during this new leg should resume too.
+				persistActiveSession(store, 'active')
 				renderIndicatorState(store)
 				void startRecording(store, ctx)
 			},
@@ -2214,8 +2360,25 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 		name: 'user-test',
 		onInit(ctx) {
 			if (typeof window === 'undefined' || typeof document === 'undefined') return
-			const slug = getTestSlug(merged.queryParam)
+			const urlSlug = getTestSlug(merged.queryParam)
+			// Resume source of truth: a non-stale persisted session for THIS origin
+			// means a test is in progress, even when the URL no longer carries
+			// `?usero_test`/`uts` (the common case after an OAuth round-trip strips
+			// the params). We resume it unless the URL explicitly names a DIFFERENT
+			// slug (a fresh test on the same origin supersedes a stale-but-in-window
+			// leftover, so we drop the old one rather than resuming the wrong test).
+			const resumeState = readActiveSession()
+			const resumable = resumeState && (!urlSlug || urlSlug === resumeState.slug) ? resumeState : null
+			if (resumeState && !resumable) {
+				// URL names a different test than the persisted one: the old session
+				// is abandoned in favour of the new test. Clear it so we don't leave
+				// a dangling resume pointer (the server stale sweep finalises it).
+				clearActiveSession()
+			}
+
+			const slug = resumable?.slug ?? urlSlug
 			if (!slug) return
+			const isResume = resumable !== null
 
 			const apiUrl = merged.apiUrl || ctx.baseUrl || DEFAULT_API_URL
 			const store: RecorderStore = {
@@ -2225,10 +2388,14 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				clientId: null,
 				recorder: null,
 				stream: null,
-				chunkIndex: 0,
+				// On resume, continue the chunk index so we never overwrite a chunk
+				// already shipped in the pre-navigation leg.
+				chunkIndex: resumable?.nextChunkIndex ?? 0,
 				uploadQueue: Promise.resolve(),
 				pendingUploads: 0,
-				startedAt: Date.now(),
+				// On resume, keep the ORIGINAL session start so duration + staleness
+				// stay anchored to when the test actually began, not the return moment.
+				startedAt: resumable?.startedAt ?? Date.now(),
 				indicator: null,
 				indicatorRoot: null,
 				indicatorState: 'recording',
@@ -2254,6 +2421,7 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				notePopoverAtMs: null,
 				endNote: '',
 				finishFlowRan: false,
+				resumed: isResume,
 				replayOffsetAtStartMs: null,
 			}
 			ctx.setStore(store)
@@ -2368,47 +2536,60 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 			document.addEventListener('keydown', onKeydown)
 
 			const pageHide = (): void => {
-				// Best-effort flush + finalise. We don't await here; the browser
-				// is shutting the page down. `keepalive: true` on finalise lets
-				// the request race the unload.
-				void finishFlow(store, ctx, { showThanks: false })
+				// PAUSE, do not finalise. A hard navigation (e.g. an OAuth round
+				// trip) destroys the MediaStream, but the session must survive so
+				// recording resumes on return. We stop the recorder, mark the
+				// persisted state paused, and let queued chunk uploads race the
+				// unload on `keepalive`. Finalisation now comes only from an
+				// explicit Finish tap or the server-side stale sweep (~10 min of
+				// no chunks). See pauseFlow.
+				pauseFlow(store)
 			}
 			store.pageHideHandler = pageHide
 			window.addEventListener('pagehide', pageHide)
 
-			// visibilitychange -> hidden is the reliable mobile unload backstop:
-			// iOS frequently kills a backgrounded tab WITHOUT ever firing
-			// pagehide, leaving the session stuck un-finalised. visibilitychange
-			// fires far more consistently when the tab is backgrounded. It runs
-			// the SAME finishFlow path as pagehide; finishFlow is idempotent (the
-			// `finishFlowRan` + indicatorState short-circuit at its top), so the
-			// manual Finish click, pagehide, and this handler can fire in any
-			// order or concurrently and only the first does the work. Like
-			// pagehide we don't await; finalise rides on `keepalive: true`.
+			// visibilitychange -> hidden is the reliable mobile backstop: iOS
+			// frequently backgrounds/kills a tab WITHOUT firing pagehide. It runs
+			// the SAME pause path; pauseFlow is idempotent and non-terminal, so a
+			// later Finish tap (or a resume) still works after the tab returns to
+			// the foreground. We don't finalise here either, for the same reason.
 			const onVisibilityChange = (): void => {
 				if (document.visibilityState !== 'hidden') return
-				void finishFlow(store, ctx, { showThanks: false })
+				pauseFlow(store)
 			}
 			store.visibilityHandler = onVisibilityChange
 			document.addEventListener('visibilitychange', onVisibilityChange)
 
 			void (async (): Promise<void> => {
-				// If the entry screen created the session and passed `uts`, ADOPT
-				// it (the participant's email is already attached server-side).
-				// Otherwise fall back to creating one (open tests / old links).
-				const adoptId = getAdoptSessionId()
+				// Resolve the session for this leg. Three paths:
+				//   1. RESUME (storage has a non-stale session): ADOPT the existing
+				//      id. Never create a new one. Works even when the URL lost its
+				//      `?usero_test`/`uts` params after a hard navigation.
+				//   2. Entry-screen created session (`uts` in URL): ADOPT it.
+				//   3. Open test (old link, no uts): CREATE a fresh session.
+				// adopt is an idempotent GET, so re-adopting a still-active session
+				// on resume is safe and does not disturb its server state.
+				const adoptId = resumable?.sessionId ?? getAdoptSessionId()
 				const created = adoptId
 					? await adoptSession(apiUrl, adoptId)
 					: await createSession(apiUrl, slug, readTesterName(merged.testerName))
 				if (store.cancelled) return
 				if (!created) {
 					ctx.logger.error(adoptId ? 'failed to adopt user-test session' : 'failed to create user-test session')
+					// A resume that can't re-adopt its session (server says gone, or
+					// network down) clears the stale pointer so we don't loop trying
+					// to resume a session that no longer exists.
+					if (isResume) clearActiveSession()
 					store.indicatorState = 'error'
 					renderIndicatorState(store)
 					return
 				}
 				store.sessionId = created.sessionId
 				store.clientId = created.clientId
+				// Persist (or refresh) the resume pointer now that we have a session
+				// id, BEFORE the first chunk flushes, so a hard navigation in the
+				// first few seconds of recording still resumes.
+				persistActiveSession(store, 'active')
 				// Capture the replay offset HERE at session start (not at
 				// finalise) so it reflects when the test began relative to the
 				// recording. The replay plugin publishes its start epoch into
@@ -2478,4 +2659,6 @@ export const __test__ = {
 	rmsDbFromSamples,
 	SILENCE_RMS_DB_THRESHOLD,
 	SILENCE_FLOOR_DB,
+	parseActiveSession,
+	ACTIVE_SESSION_MAX_AGE_MS,
 }
