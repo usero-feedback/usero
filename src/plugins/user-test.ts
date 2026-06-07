@@ -49,6 +49,8 @@ import type { UseroPlugin } from '../plugin'
 import { DEFAULT_API_URL } from '../types'
 import { finishFlow, pauseFlow } from './user-test/lifecycle'
 import {
+	classifyChunkResponse,
+	handleSessionClosed,
 	isMediaRecorderSupported,
 	isStreamSilent,
 	pickMimeType,
@@ -191,12 +193,31 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				notePopoverAtMs: null,
 				endNote: '',
 				finishFlowRan: false,
+				sessionClosed: false,
+				onSessionClosed: null,
 				paused: false,
 				resumed: isResume,
 				sdkSessionId: null,
 				replayOffsetAtStartMs: null,
 			}
 			ctx.setStore(store)
+
+			// Terminal close handler invoked by the chunk-upload path when the
+			// server reports the session is already closed (409 + closeResume) while
+			// recording, e.g. finalise was triggered elsewhere or the stale sweep
+			// closed it. Mirror the adopt-time 'closed' branch below: stop recording,
+			// clear the resume pointer so a later visit never resurrects it, and show
+			// the honest terminal "this test session ended" notice. No retries.
+			store.onSessionClosed = (): void => {
+				if (store.cancelled) return
+				ctx.logger.info('user-test session closed by server during upload; stopping recording')
+				stopRecording(store)
+				clearActiveSession()
+				store.indicatorState = 'done'
+				if (store.indicatorRoot && !merged.hideIndicator) {
+					showSessionEndedScreen(store.indicatorRoot)
+				}
+			}
 
 			const onFinish = (): void => {
 				void finishFlow(store, ctx, { showThanks: true })
@@ -475,6 +496,8 @@ export const __test__ = {
 	getTestSlug,
 	pickMimeType,
 	isMediaRecorderSupported,
+	classifyChunkResponse,
+	handleSessionClosed,
 	micChipState,
 	isStreamSilent,
 	rmsDbFromSamples,

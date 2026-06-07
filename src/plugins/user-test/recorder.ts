@@ -7,6 +7,7 @@
 import type { PluginContext } from '../../plugin'
 import { persistActiveSession } from './session'
 import {
+	type ChunkUploadOutcome,
 	IDB_NAME,
 	IDB_STORE,
 	type PendingChunk,
@@ -112,6 +113,38 @@ async function idbListChunks(sessionId: string): Promise<PendingChunk[]> {
 	return items
 }
 
+// Classification of a single chunk-upload HTTP response. A pure function of the
+// status + parsed body so it can be unit-tested without a real fetch:
+//   - 'ok': 2xx. The chunk landed (or the server idempotently accepted a re-fire).
+//   - 'closed': the server says the session is finalised/closed and resume must
+//     stop. The contract is a 409 carrying `{ closeResume: true }` (the chunk
+//     route returns exactly this when the session status is 'finalising'; see
+//     decideChunkUpload on the server). This is the ONLY signal that stops
+//     recording. A 409 WITHOUT closeResume (e.g. completed/failed past the
+//     late-chunk grace) is treated as a plain rejection, NOT a stop, so a racing
+//     trailing chunk can't tear down a session the participant may still resume.
+//   - 'retry': transient (network handled by the caller's catch, or 5xx / 408 /
+//     429). Worth another attempt.
+//   - 'fatal': a non-closing 4xx (bad request, 413 too large, 404). Won't improve
+//     on retry; bail this chunk. The caller maps both 'fatal' and exhausted
+//     'retry' to the 'failed' outcome (stash for a later offline flush).
+export type ChunkResponseClass = 'ok' | 'closed' | 'retry' | 'fatal'
+
+export function classifyChunkResponse(status: number, body: unknown): ChunkResponseClass {
+	if (status >= 200 && status < 300) return 'ok'
+	// Definitive session-closed signal: 409 + closeResume: true. Read the flag
+	// defensively (the body may be absent / non-object on a malformed response).
+	if (status === 409 && typeof body === 'object' && body !== null && (body as { closeResume?: unknown }).closeResume === true) {
+		return 'closed'
+	}
+	// 5xx and the two retry-after statuses are transient.
+	if (status >= 500 || status === 408 || status === 429) return 'retry'
+	// Any other 4xx is a hard rejection that retries can't fix.
+	if (status >= 400) return 'fatal'
+	// 1xx/3xx shouldn't reach here for this endpoint; treat as transient.
+	return 'retry'
+}
+
 async function uploadChunkWithRetry(
 	apiUrl: string,
 	sessionId: string,
@@ -119,7 +152,7 @@ async function uploadChunkWithRetry(
 	blob: Blob,
 	logger: PluginContext['logger'],
 	maxAttempts = 5,
-): Promise<boolean> {
+): Promise<ChunkUploadOutcome> {
 	const url = `${apiUrl.replace(/\/$/, '')}/api/user-test-sessions/${encodeURIComponent(sessionId)}/chunk?index=${index}`
 	let attempt = 0
 	while (attempt < maxAttempts) {
@@ -130,12 +163,25 @@ async function uploadChunkWithRetry(
 				headers: { 'Content-Type': blob.type || 'audio/webm' },
 				keepalive: blob.size <= 60 * 1024, // browsers cap keepalive bodies
 			})
-			if (res.ok) return true
-			// 4xx (other than 413) won't get better with retries; bail early.
-			if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
-				logger.error(`chunk ${index} rejected with ${res.status}`)
-				return false
+			if (res.ok) return 'ok'
+			// Read the body to distinguish a session-closed signal (409 +
+			// closeResume) from an ordinary rejection. Tolerate a non-JSON body.
+			let body: unknown = null
+			try {
+				body = await res.json()
+			} catch {
+				body = null
 			}
+			const klass = classifyChunkResponse(res.status, body)
+			if (klass === 'closed') {
+				logger.info(`chunk ${index}: server reports session closed; stopping`)
+				return 'closed'
+			}
+			if (klass === 'fatal') {
+				logger.error(`chunk ${index} rejected with ${res.status}`)
+				return 'failed'
+			}
+			// 'retry' falls through to the backoff loop below.
 		} catch (err) {
 			logger.warn(`chunk ${index} upload attempt ${attempt + 1} failed`, err)
 		}
@@ -143,20 +189,43 @@ async function uploadChunkWithRetry(
 		const backoff = Math.min(15000, 500 * 2 ** attempt) + Math.floor(Math.random() * 250)
 		await new Promise(resolve => setTimeout(resolve, backoff))
 	}
-	return false
+	return 'failed'
 }
 
 export async function flushPendingFromIdb(store: RecorderStore, ctx: PluginContext): Promise<void> {
 	if (!store.sessionId) return
 	const pending = await idbListChunks(store.sessionId)
 	for (const chunk of pending) {
-		const ok = await uploadChunkWithRetry(chunk.apiUrl, chunk.sessionId, chunk.chunkIndex, chunk.blob, ctx.logger, 3)
-		if (ok) await idbDeleteChunk(chunk.id)
+		const outcome = await uploadChunkWithRetry(chunk.apiUrl, chunk.sessionId, chunk.chunkIndex, chunk.blob, ctx.logger, 3)
+		if (outcome === 'ok') {
+			await idbDeleteChunk(chunk.id)
+		} else if (outcome === 'closed') {
+			// Session closed server-side while draining the offline stash: stop the
+			// flush and run the terminal close once. The stashed chunks can never
+			// land now, but we leave them in IDB (harmless, swept by age) rather
+			// than racing a delete during teardown.
+			handleSessionClosed(store)
+			return
+		}
+		// 'failed': leave the chunk stashed for a future flush attempt.
 	}
 }
 
+// Run the terminal close exactly once. Idempotent: the sessionClosed guard means
+// repeated calls (several queued chunks all rejected) only fire the handler the
+// first time. The actual stop/clear/ended-screen work lives in store.onSessionClosed,
+// wired by the entry module where the indicatorRoot is in scope.
+export function handleSessionClosed(store: RecorderStore): void {
+	if (store.sessionClosed) return
+	store.sessionClosed = true
+	store.onSessionClosed?.()
+}
+
 function enqueueChunk(store: RecorderStore, ctx: PluginContext, blob: Blob): void {
-	if (store.cancelled || !store.sessionId || blob.size === 0) return
+	// Once the server has told us the session is closed, drop any further chunks.
+	// They can never land (post-finalise rejection), and stashing them for retry
+	// would just spin against a closed session.
+	if (store.cancelled || store.sessionClosed || !store.sessionId || blob.size === 0) return
 	const index = store.chunkIndex
 	store.chunkIndex += 1
 	// Advance the persisted resume pointer so a hard navigation mid-recording
@@ -171,8 +240,18 @@ function enqueueChunk(store: RecorderStore, ctx: PluginContext, blob: Blob): voi
 	const apiUrl = store.options.apiUrl
 
 	store.uploadQueue = store.uploadQueue.then(async () => {
-		const ok = await uploadChunkWithRetry(apiUrl, sessionId, index, blob, ctx.logger)
-		if (!ok) {
+		// A prior chunk in the queue may have already seen the close signal; skip
+		// the upload entirely if so.
+		if (store.sessionClosed) {
+			store.pendingUploads -= 1
+			return
+		}
+		const outcome = await uploadChunkWithRetry(apiUrl, sessionId, index, blob, ctx.logger)
+		if (outcome === 'closed') {
+			// Definitive server "session closed". Stop recording, clear resume
+			// state, show the ended screen. Do NOT stash: the chunk can't land.
+			handleSessionClosed(store)
+		} else if (outcome === 'failed') {
 			ctx.logger.warn(`chunk ${index} stashed for offline retry`)
 			await idbStashChunk({
 				id: `${sessionId}:${index}:${Date.now()}`,

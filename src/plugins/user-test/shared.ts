@@ -98,6 +98,19 @@ export interface RecorderStore {
 	endNote: string
 	// Re-entry guard for finishFlow.
 	finishFlowRan: boolean
+	// Set once the chunk-upload path sees a definitive "session closed" signal
+	// from the server (409 + closeResume: true, raised when finalise has already
+	// snapshotted the session). Guards against running the terminal close flow
+	// twice when several queued chunks all get rejected. Once true, enqueueChunk
+	// drops further chunks rather than stashing them for a retry that can never
+	// land.
+	sessionClosed: boolean
+	// Terminal-close handler, wired in the entry module where the indicatorRoot
+	// and hideIndicator option are in scope. Invoked once by the chunk-upload
+	// path when the server reports the session is closed: it stops recording,
+	// clears the persisted resume state, and shows the "session ended" screen.
+	// Null until the entry module wires it (and when there's nothing to close).
+	onSessionClosed: (() => void) | null
 	// True once pauseFlow has run for a hard navigation (page hidden mid-test).
 	// Set BEFORE stopRecording() so the final trailing `dataavailable` chunk that
 	// stopRecording triggers persists as 'paused' (keeping pausedAt), not 'active'.
@@ -218,6 +231,20 @@ export type AdoptResult =
 	| { kind: 'ok'; sessionId: string; clientId: string; tasks: UserTestTask[] }
 	| { kind: 'closed' }
 	| { kind: 'error' }
+
+// Outcome of a single chunk upload (after its internal retry loop). The chunk
+// path must distinguish three cases, because each demands different handling:
+//   - 'ok': the chunk landed (2xx, or the server's idempotent re-fire success).
+//     Normal path, nothing more to do.
+//   - 'closed': the server returned a definitive "session is closed" signal
+//     (409 + closeResume: true, raised once finalise has snapshotted the
+//     session). Recording must STOP, resume state must be cleared, and the
+//     terminal screen shown. NEVER retry or stash: the chunk can never land.
+//   - 'failed': a transient failure (network blip, 5xx, 408/429) that exhausted
+//     the retry budget, OR a non-closing 4xx rejection. The session is still
+//     considered live, so the chunk is stashed in IndexedDB for a later offline
+//     flush. This is the pre-existing "return false" behaviour.
+export type ChunkUploadOutcome = 'ok' | 'closed' | 'failed'
 
 export interface FinaliseNote {
 	atMs: number
