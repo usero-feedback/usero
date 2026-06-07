@@ -20,7 +20,7 @@ import {
 } from './shared'
 
 export function buildIndicator(host: HTMLElement, store: RecorderStore, callbacks: IndicatorCallbacks): ShadowRoot {
-	const root = host.attachShadow({ mode: 'closed' })
+	const root = host.attachShadow({ mode: 'open' })
 	const style = document.createElement('style')
 	// Compact, glassy dark pill. Mic chip is now a real button with three
 	// states (recording / muted / no-mic). Notes button sits beside it.

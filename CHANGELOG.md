@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.12
+
+Patch. The user-test plugin's indicator UI now attaches its shadow root with `mode: 'open'` instead of `mode: 'closed'`. Closed shadow roots return null from `host.shadowRoot`, so browser extensions like Vimium cannot walk to the focused inner element and treat keystrokes in the notes textarea as commands (for example `t` opens a new tab). The main vanilla widget already uses open mode; this brings the user-test plugin in line. CSS isolation is identical in open mode, closed mode only adds JS privacy, which is trivially bypassable anyway.
+
 ## 1.1.11
 
 Patch. Session replay now records SPA client-side route changes as rrweb `url-change` custom events. The session-replay plugin patches `history.pushState` and `history.replaceState` and listens for `popstate`, emitting a custom event with the new URL whenever the route changes after the initial page load. Previously a recording carried only the Meta href captured at recording start, so any in-app navigation in a single-page app was invisible to the player; recordings now reflect the URL the user was actually on for each part of the session. Backwards compatible: this is additive, the new events sit alongside the existing rrweb stream, and any consumer that does not read `url-change` events is unaffected. No public API or wire-format changes.
