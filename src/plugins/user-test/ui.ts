@@ -19,6 +19,60 @@ import {
 	TICK_SM_SVG,
 } from './shared'
 
+// How far the visual viewport must be inset from the layout viewport before we
+// treat it as an open soft keyboard. Mobile URL-bar collapse and minor browser
+// chrome churn produce small insets (< ~60px); keyboards are 150px+.
+const KEYBOARD_OPEN_MIN_INSET_PX = 80
+
+// Pure keyboard-inset math, exported for unit tests. The soft keyboard shrinks
+// the VISUAL viewport but not the LAYOUT viewport that position:fixed anchors
+// to, so the gap between the two (accounting for any visual-viewport pan via
+// offsetTop) is the height of the strip the keyboard covers.
+export function computeKeyboardInset(innerHeight: number, viewportHeight: number, viewportOffsetTop: number): number {
+	return Math.max(0, Math.round(innerHeight - (viewportHeight + viewportOffsetTop)))
+}
+
+// Keeps the floating anchor riding above the mobile soft keyboard. Writes
+// --keyboard-inset / --vv-height custom properties plus data attributes that
+// the stylesheet keys off. Coalesces resize + scroll events into one rAF per
+// frame; scroll-sourced updates suppress the bottom transition so tracking
+// stays 1:1 while panning. No-ops (and returns a no-op teardown) when
+// visualViewport is unsupported, matching the pre-fix behaviour.
+function installKeyboardInsetWatcher(anchor: HTMLElement): (() => void) | null {
+	const viewport = window.visualViewport
+	if (!viewport) return null
+	let rafId = 0
+	let lastInset = -1
+	let resizeSeen = false
+	const apply = (): void => {
+		rafId = 0
+		const fromResize = resizeSeen
+		resizeSeen = false
+		const inset = computeKeyboardInset(window.innerHeight, viewport.height, viewport.offsetTop)
+		if (inset === lastInset) return
+		lastInset = inset
+		anchor.setAttribute('data-vv-scrolling', fromResize ? 'false' : 'true')
+		anchor.style.setProperty('--keyboard-inset', `${inset}px`)
+		anchor.style.setProperty('--vv-height', `${Math.round(viewport.height)}px`)
+		anchor.setAttribute('data-keyboard-open', inset >= KEYBOARD_OPEN_MIN_INSET_PX ? 'true' : 'false')
+	}
+	const schedule = (): void => {
+		if (rafId === 0) rafId = window.requestAnimationFrame(apply)
+	}
+	const onResize = (): void => { resizeSeen = true; schedule() }
+	const onScroll = (): void => { schedule() }
+	viewport.addEventListener('resize', onResize)
+	viewport.addEventListener('scroll', onScroll)
+	// Seed once so a panel opened with the keyboard already up starts correct.
+	resizeSeen = true
+	apply()
+	return (): void => {
+		viewport.removeEventListener('resize', onResize)
+		viewport.removeEventListener('scroll', onScroll)
+		if (rafId !== 0) window.cancelAnimationFrame(rafId)
+	}
+}
+
 export function buildIndicator(host: HTMLElement, store: RecorderStore, callbacks: IndicatorCallbacks): ShadowRoot {
 	const root = host.attachShadow({ mode: 'open' })
 	const style = document.createElement('style')
@@ -27,13 +81,29 @@ export function buildIndicator(host: HTMLElement, store: RecorderStore, callback
 	style.textContent = `
 		:host { all: initial; }
 		.anchor {
+			/* --keyboard-inset is the height of the mobile soft keyboard, written by
+			   the visualViewport watcher (0 when closed / unsupported). position:fixed
+			   anchors to the LAYOUT viewport, which the keyboard does not shrink, so
+			   without this the open keyboard covers the bar and task panel entirely. */
+			--keyboard-inset: 0px;
 			position: fixed;
-			bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
+			bottom: calc(env(safe-area-inset-bottom, 0px) + 16px + var(--keyboard-inset));
 			left: 50%; transform: translateX(-50%);
 			display: flex; flex-direction: column; align-items: center; gap: 8px;
 			z-index: 2147483646; max-width: calc(100vw - 32px);
 			font: 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
 			color: #fff;
+			/* Eased only for keyboard show/hide; scroll ticks suppress it below. */
+			transition: bottom 0.18s ease-out;
+		}
+		/* While the visual viewport is being panned (URL bar collapse, pinch,
+		   keyboard-driven scroll) the inset must track 1:1, animating every tick
+		   reads as lag. The watcher flips this attribute per update source. */
+		.anchor[data-vv-scrolling="true"] { transition: none; }
+		/* Keyboard open: the keyboard covers the home-indicator zone, so the
+		   safe-area + 16px margin is dead space. Tuck in to an 8px gap instead. */
+		.anchor[data-keyboard-open="true"] {
+			bottom: calc(var(--keyboard-inset) + 8px);
 		}
 		.bar {
 			display: inline-flex; align-items: center; gap: 6px;
@@ -56,6 +126,16 @@ export function buildIndicator(host: HTMLElement, store: RecorderStore, callback
 			width: max-content; overflow-y: auto;
 		}
 		.panel[hidden] { display: none; }
+		/* Compact state while the keyboard is up: 60vh is measured against the
+		   LAYOUT viewport and can exceed the visible strip above the keyboard,
+		   clipping the instructions. Cap against the VISUAL viewport height
+		   (--vv-height, written by the watcher) minus the bar's footprint, with a
+		   96px floor so at least a couple of lines stay readable and scrollable.
+		   Slightly tighter padding to make the most of the scarce space. */
+		.anchor[data-keyboard-open="true"] .panel {
+			max-height: min(480px, max(96px, calc(var(--vv-height, 100vh) - 96px)));
+			padding: 10px 12px 10px 8px;
+		}
 		.panel ol { margin: 0; padding-left: 26px; }
 		.panel li { margin: 0 0 8px; }
 		.panel li:last-child { margin: 0; }
@@ -491,10 +571,12 @@ export function buildIndicator(host: HTMLElement, store: RecorderStore, callback
 			.dot { animation: none; }
 			.toast, .note-popover, .resume-toast { animation: none; }
 			.resume-toast[data-leaving="true"] { opacity: 0; }
+			.anchor { transition: none; }
 		}
 	`
 	const anchor = document.createElement('div')
 	anchor.className = 'anchor'
+	store.keyboardWatcherCleanup = installKeyboardInsetWatcher(anchor)
 
 	const panel = document.createElement('div')
 	panel.className = 'panel'

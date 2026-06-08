@@ -86,6 +86,7 @@ import {
 import {
 	buildIndicator,
 	closeNotePopover,
+	computeKeyboardInset,
 	installTasksToggle,
 	micChipState,
 	openNotePopover,
@@ -177,6 +178,7 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				tasksPanelOpen: readTasksPanelOpen(),
 				outsidePointerHandler: null,
 				keydownHandler: null,
+				keyboardWatcherCleanup: null,
 				hasMicPermission: false,
 				micAcquiring: true,
 				micFailReason: null,
@@ -474,6 +476,10 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				document.removeEventListener('keydown', store.keydownHandler)
 				store.keydownHandler = null
 			}
+			if (store.keyboardWatcherCleanup) {
+				store.keyboardWatcherCleanup()
+				store.keyboardWatcherCleanup = null
+			}
 			for (const id of store.muteToastTimers) {
 				try { window.clearTimeout(id) } catch { /* ignore */ }
 			}
@@ -499,6 +505,7 @@ export const __test__ = {
 	classifyChunkResponse,
 	handleSessionClosed,
 	micChipState,
+	computeKeyboardInset,
 	isStreamSilent,
 	rmsDbFromSamples,
 	SILENCE_RMS_DB_THRESHOLD,

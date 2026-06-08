@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.13
+
+Patch. Fix a real-user-reported mobile bug: the user-test plugin's floating bar and task panel were completely hidden behind the soft keyboard, so participants could not read their task instructions while typing. The anchor is position fixed, which pins to the layout viewport; the soft keyboard shrinks only the visual viewport, so the open keyboard covered the panel and safe-area-inset-bottom did nothing. The indicator now watches window.visualViewport (resize and scroll, coalesced into one rAF per frame) and writes the keyboard inset into a CSS custom property that lifts the anchor above the keyboard. Keyboard show and hide get a short eased transition; scroll-driven viewport pans track 1:1 with no animation lag. While the keyboard is open the panel also enters a compact state: the bottom margin tightens to 8px (the keyboard covers the home-indicator zone anyway), panel padding shrinks, and the panel max-height is capped against the visual viewport height with a 96px floor so a couple of lines of instructions always stay readable and scrollable. Feature-detected: browsers without visualViewport keep the old behaviour. Listeners are torn down on plugin destroy. Pure inset math is unit tested. Backwards compatible: no public API or wire-format changes.
+
 ## 1.1.12
 
 Patch. The user-test plugin's indicator UI now attaches its shadow root with `mode: 'open'` instead of `mode: 'closed'`. Closed shadow roots return null from `host.shadowRoot`, so browser extensions like Vimium cannot walk to the focused inner element and treat keystrokes in the notes textarea as commands (for example `t` opens a new tab). The main vanilla widget already uses open mode; this brings the user-test plugin in line. CSS isolation is identical in open mode, closed mode only adds JS privacy, which is trivially bypassable anyway.

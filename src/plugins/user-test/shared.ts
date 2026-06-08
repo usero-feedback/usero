@@ -64,6 +64,10 @@ export interface RecorderStore {
 	tasksPanelOpen: boolean
 	outsidePointerHandler: ((event: PointerEvent) => void) | null
 	keydownHandler: ((event: KeyboardEvent) => void) | null
+	// Teardown for the visualViewport keyboard-inset watcher that keeps the
+	// floating bar/panel above the mobile soft keyboard. Null when the
+	// indicator is hidden or visualViewport is unsupported.
+	keyboardWatcherCleanup: (() => void) | null
 	// Mic mute
 	hasMicPermission: boolean
 	// True while getUserMedia is in flight (pending). Distinguishes the
