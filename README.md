@@ -175,6 +175,85 @@ Tag any DOM node you want masked at the source: `<div data-usero-mask>...</div>`
 
 Standalone-only options: `clientId` (required for `.start()`), `user` / `getUser` (identify the current user), and `apiUrl` (override the API host, defaults to `https://usero.io`). Advanced chunking knobs (`chunkSeconds`, `chunkMaxEvents`, `chunkMaxBytes`, `chunkMaxAttempts`, `checkoutEveryMs`) are documented in the `SessionReplayOptions` type.
 
+## Headless (bring your own UI)
+
+The widget's look is configurable but its structure is fixed: a launcher button, a panel, our copy. If you want full control, a modal that matches your design system, a form embedded in your settings page, your own copy, import the headless core instead. You get the same submission pipeline, identity handling, and plugin support as the widget, with zero UI and zero opinion about how feedback gets collected.
+
+```ts
+import { createUseroFeedback } from '@usero/sdk/headless'
+
+const usero = createUseroFeedback({ clientId: 'YOUR_CLIENT_ID' })
+
+// Wire this to your own form's submit handler.
+const result = await usero.submit({ rating: 4, comment: 'Love the new dashboard' })
+if (!result.success) showError(result.error)
+```
+
+`submit()` validates the payload (a submission needs a rating or a non-empty comment), captures page context (URL, title, referrer) automatically, runs the plugin pipeline, and POSTs to Usero. It resolves with `{ success: false, error }` instead of throwing, for validation and network failures alike, so your form can render the message directly.
+
+There is deliberately no `open()`, `close()`, or `isOpen`. When you own the UI, you own its state.
+
+### React
+
+```tsx
+import { useUseroFeedback } from '@usero/sdk/headless/react'
+
+function FeedbackModal({ onDone }: { onDone: () => void }) {
+  const usero = useUseroFeedback({ clientId: 'YOUR_CLIENT_ID' })
+  const [comment, setComment] = useState('')
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault()
+    const result = await usero.submit({ comment })
+    if (result.success) onDone()
+  }
+
+  return <form onSubmit={handleSubmit}>{/* your design system here */}</form>
+}
+```
+
+The hook is SSR-safe (the controller is created in an effect, never on the server), StrictMode-safe, and destroys the controller on unmount. Options are captured on first render, except `user`, which stays reactive: pass the current user object (or `null` on logout) and the SDK re-identifies when it changes by value.
+
+### Session replay with your custom UI
+
+Pass `sessionReplay()` into `plugins` and every submission from your custom UI deep-links to the exact moment in the recording, the same as it does with our widget. The plugin pipeline runs on every `submit()`, so the replay plugin attaches `sessionReplayId` and `replayOffsetMs` for you.
+
+```ts
+import { createUseroFeedback } from '@usero/sdk/headless'
+import { sessionReplay } from '@usero/sdk/replay'
+
+const usero = createUseroFeedback({
+  clientId: 'YOUR_CLIENT_ID',
+  plugins: [sessionReplay()],
+})
+```
+
+One caveat: if you render your feedback UI inside a ShadowRoot, call `usero.notifyShadowMount(root)` after attaching it so the recorder re-snapshots and captures your UI. Light-DOM UIs are recorded without any extra call.
+
+### Screenshots
+
+Collect a `File` however you like (a file input, a paste handler, your own capture flow), upload it, and include the result in a later submit:
+
+```ts
+const screenshot = await usero.uploadScreenshot(file) // throws on failure
+await usero.submit({ comment: 'Broken layout', screenshots: [screenshot] })
+```
+
+### Identity
+
+```ts
+usero.identify({ id: user.id, email: user.email, traits: { plan: 'pro' } })
+usero.identify(null) // logout: rotates the anonymousId
+```
+
+Identify calls are deduped, so calling on every render or route change is free when nothing changed. You can also pass `user` or `getUser` in the options instead; `getUser` is re-resolved at submit time, so a login that happens after creation is picked up without extra wiring.
+
+### Full surface
+
+`createUseroFeedback(options)` takes `clientId` (required), `apiUrl`, `environment`, `metadata` (attached to every submission, deep-merged one level with per-submission metadata), `plugins`, and `user` / `getUser`. The returned controller has `submit`, `uploadScreenshot`, `identify`, `whenReady` (resolves when every plugin's `onInit` has settled), `notifyShadowMount`, and `destroy`. Everything is typed: `SubmitFeedbackPayload`, `SubmissionResponse`, `ScreenshotData`, `UseroUser`, `UseroPlugin`, and friends are all exported from `@usero/sdk/headless`.
+
+The headless entry is its own subpath export with no widget CSS, no React, and no rrweb: 3.2KB gzipped minified.
+
 ## Plugins
 
 The widget has a tiny plugin API for opt-in features that would otherwise bloat the base bundle. Plugins live in subpath exports so the base widget stays small for everyone who doesn't use them. Session replay (above) is the flagship plugin; it doubles as a standalone recorder.

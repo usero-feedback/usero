@@ -12,21 +12,13 @@
 import { FeedbackApiClient } from './api'
 import { getGradientEnd } from './colorUtils'
 import {
-	getCurrentUserId,
-	getOrMintAnonymousId,
-	getOrMintSdkSessionId,
-	reseatSdkSessionId,
-	getReplayStartMs,
-	handleLogout as identityHandleLogout,
-	identifyIfChanged,
-	publishReplayStartMs,
-	__test__ as identityTestHooks,
-} from './identity'
-import {
-	createPluginLogger,
-	type PluginContext,
-	type UseroPlugin,
-} from './plugin'
+	buildFeedbackSubmission,
+	createIdentityHandle,
+	createPluginRuntime,
+	submitWithPlugins,
+} from './core'
+import { __test__ as identityTestHooks } from './identity'
+import { type UseroPlugin } from './plugin'
 import { DEFAULT_API_URL, type UseroUser } from './types'
 import {
 	DARK_THEME,
@@ -137,31 +129,9 @@ function escapeHtml(value: string): string {
 	})
 }
 
-// Merge plugin onFeedbackSubmit patches into a base submission.
-//
-// Top-level keys: shallow-merge, later patches win wholesale.
-// `metadata`: deep-merge one level. Earlier keys are preserved when later
-// patches don't set them; later keys win on conflict. This means two
-// plugins can both contribute `metadata: { ... }` without either erasing
-// the other's keys.
-export function mergePluginPatches(
-	base: FeedbackSubmission,
-	patches: ReadonlyArray<Partial<FeedbackSubmission> | undefined>,
-): FeedbackSubmission {
-	let result: FeedbackSubmission = base
-	for (const patch of patches) {
-		if (!patch || typeof patch !== 'object') continue
-		const { metadata: patchMetadata, ...rest } = patch
-		result = { ...result, ...rest }
-		if (patchMetadata && typeof patchMetadata === 'object') {
-			result.metadata = {
-				...(result.metadata ?? {}),
-				...patchMetadata,
-			}
-		}
-	}
-	return result
-}
+// Moved to core.ts (shared with `@usero/sdk/headless`); re-exported here
+// because it has always been part of this entry's public surface.
+export { mergePluginPatches } from './core'
 
 function readStoredEmail(): string {
 	if (typeof window === 'undefined') return ''
@@ -225,130 +195,26 @@ export function initUseroFeedbackWidget(
 	let onError: FeedbackWidgetProps['onError'] = props.onError
 	let onOpen: FeedbackWidgetProps['onOpen'] = props.onOpen
 	let onClose: FeedbackWidgetProps['onClose'] = props.onClose
-	let getUserFn: FeedbackWidgetProps['getUser'] = props.getUser
-	// Last `user` prop seen via init or update(). When set (including
-	// explicit null for logout), it wins over getUserFn on re-resolve.
-	// `undefined` means "no `user` prop ever supplied; defer to getUser".
-	let currentUserProp: UseroUser | null | undefined = props.user
-
 	const apiClient = new FeedbackApiClient(baseUrl)
-	const identifyTransport = { apiUrl: baseUrl ?? DEFAULT_API_URL, clientId }
 
-	// Track the last id the SDK has seen so we can detect logout
-	// (id -> null) and rotate the anonymousId. Identify dedupe inside
-	// identifyIfChanged via a fingerprint guarantees re-runs with the same
-	// user never POST. We also short-circuit BEFORE calling it when the
-	// trait object is reference-identical, which only catches hosts that
-	// memoise their traits object; the common React case of a fresh
-	// `{ ... }` literal per render falls through to the fingerprint
-	// dedupe, which is cheap (one stringify, no network) so this is fine.
-	let lastUserId: string | null = null
-	let lastTraitsRef: UseroUser['traits'] | undefined
-	let lastEmail: string | undefined
-	let lastDisplayName: string | undefined
+	// Identity resolution lives in the shared core (same logic drives
+	// `@usero/sdk/headless`): user-prop-over-getUser precedence, reference
+	// short-circuit, identify dedupe, logout rotation. The handle does the
+	// initial resolve at creation time.
+	const identity = createIdentityHandle(
+		{ apiUrl: baseUrl ?? DEFAULT_API_URL, clientId },
+		{ user: props.user, getUser: props.getUser },
+	)
 
-	function applyResolvedUser(user: UseroUser | null | undefined): void {
-		const next = user ?? null
-		if (next) {
-			const unchanged =
-				next.id === lastUserId &&
-				next.traits === lastTraitsRef &&
-				next.email === lastEmail &&
-				next.displayName === lastDisplayName
-			if (unchanged) return
-			void identifyIfChanged(identifyTransport, next)
-			lastUserId = next.id
-			lastTraitsRef = next.traits
-			lastEmail = next.email
-			lastDisplayName = next.displayName
-		} else if (lastUserId !== null) {
-			// Logout transition. Rotate anonymousId so the next anonymous
-			// trail doesn't get auto-merged into the previous person on
-			// the next identify().
-			identityHandleLogout()
-			lastUserId = null
-			lastTraitsRef = undefined
-			lastEmail = undefined
-			lastDisplayName = undefined
-		}
-	}
-
-	function resolveAndApplyGetUser(): void {
-		if (!getUserFn) return
-		try {
-			applyResolvedUser(getUserFn() ?? null)
-		} catch {
-			// getUser threw; leave the resolved user as it was. Do not
-			// rotate, do not fire identify. A throwing getter likely means
-			// the host app's auth context is mid-render.
-		}
-	}
-
-	// Initial resolve: prefer the imperative `user` prop, fall back to
-	// the `getUser` callback. Both are safe to call here; we just don't
-	// fire identify when both are absent.
-	if (props.user !== undefined) {
-		applyResolvedUser(props.user)
-	} else if (getUserFn) {
-		resolveAndApplyGetUser()
-	}
-
-	// Plugin registry. Each plugin gets its own context with a private store.
-	// `onInit` is fired non-blocking so a slow plugin can't delay the first
-	// paint. Errors are caught so a misbehaving plugin can't tear the widget
-	// down or block submissions.
-	const pluginList: ReadonlyArray<UseroPlugin> = props.plugins ?? []
-	const pluginStores = new Map<string, unknown>()
-	const pluginContexts = new Map<string, PluginContext>()
-	// Tracks every onInit's settlement so `whenReady()` can resolve only
-	// after all plugins have finished initializing. Synchronous onInits
-	// resolve on the next microtask via Promise.resolve().
-	const initPromises: Promise<void>[] = []
-	for (const plugin of pluginList) {
-		const ctx: PluginContext = {
-			clientId,
-			baseUrl: baseUrl ?? DEFAULT_API_URL,
-			logger: createPluginLogger(plugin.name),
-			getStore: <T,>() => pluginStores.get(plugin.name) as T | undefined,
-			setStore: <T,>(value: T) => {
-				pluginStores.set(plugin.name, value)
-			},
-			// Expose the same user-resolution path the widget uses, so plugins
-			// (e.g. session-replay for replay-only installs that never open the
-			// widget) can re-poll user state at their own boundaries. Prefers
-			// the imperative `user` prop when set, falls back to `getUser`.
-			resolveUser: () => {
-				if (destroyed) return
-				if (currentUserProp !== undefined) {
-					applyResolvedUser(currentUserProp)
-				} else {
-					resolveAndApplyGetUser()
-				}
-			},
-			// Core-owned cross-cutting identity. Every plugin reads the same
-			// source of truth in identity.ts, so user-test and session-replay
-			// agree on the per-tab sdkSessionId without importing each other.
-			getSdkSessionId: () => getOrMintSdkSessionId(),
-			reseatSdkSessionId: (id: string) => reseatSdkSessionId(id),
-			getAnonymousId: () => getOrMintAnonymousId(),
-			getUserId: () => getCurrentUserId(),
-			getReplayStartMs: () => getReplayStartMs(),
-			publishReplayStartMs: (epochMs: number) => publishReplayStartMs(epochMs),
-		}
-		pluginContexts.set(plugin.name, ctx)
-		if (plugin.onInit) {
-			const settled = (async () => {
-				try {
-					await plugin.onInit?.(ctx)
-				} catch (err) {
-					ctx.logger.error('onInit threw', err)
-				}
-			})()
-			initPromises.push(settled)
-		}
-	}
-	const readyPromise: Promise<void> =
-		initPromises.length === 0 ? Promise.resolve() : Promise.all(initPromises).then(() => {})
+	// Plugin runtime lives in the shared core too: per-plugin contexts,
+	// fire-and-forget onInit with the whenReady() barrier, submit-hook
+	// merging, and onDestroy teardown.
+	const pluginRuntime = createPluginRuntime({
+		clientId,
+		apiUrl: baseUrl ?? DEFAULT_API_URL,
+		plugins: props.plugins ?? [],
+		resolveUser: () => identity.resolveUser(),
+	})
 
 	// State
 	let isOpen = false
@@ -392,7 +258,7 @@ export function initUseroFeedbackWidget(
 	// via fingerprint inside identifyIfChanged means same-user re-polls are
 	// no-ops on the network.
 	function pollGetUser(): void {
-		resolveAndApplyGetUser()
+		identity.resolveUser()
 	}
 
 	function notifyShadowUpdate(reason: 'mount' | 'panel-open'): void {
@@ -604,18 +470,21 @@ export function initUseroFeedbackWidget(
 			},
 		}
 
-		const submission: FeedbackSubmission = {
+		// Build + validate + plugin-enrich + POST all live in the shared
+		// core now (see core.ts for the merge policy on plugin patches).
+		// feedbackData above stays widget-local: it feeds the onSubmit
+		// callback, not the wire.
+		const submission = buildFeedbackSubmission({
 			clientId,
-			rating: feedbackData.rating,
-			comment: feedbackData.comment,
-			userEmail: feedbackData.userEmail,
-			pageUrl: feedbackData.metadata.pageUrl,
-			pageTitle: feedbackData.metadata.pageTitle,
-			referrer: feedbackData.metadata.referrer,
 			environment,
-		}
-		if (screenshots.length > 0) submission.screenshots = screenshots
-		if (metadata !== undefined) submission.metadata = metadata
+			metadata,
+			payload: {
+				rating: selectedRating,
+				comment,
+				userEmail: shareEmail ? userEmail : undefined,
+				screenshots,
+			},
+		})
 
 		const validation = validateFeedbackSubmission(submission)
 		if (!validation.isValid) {
@@ -624,38 +493,8 @@ export function initUseroFeedbackWidget(
 			return
 		}
 
-		// Run plugin onFeedbackSubmit hooks in parallel and merge the
-		// returned partial payloads into the outgoing submission. A plugin
-		// that throws or rejects is logged and skipped — never blocks submit.
-		//
-		// Merge policy:
-		//   - `metadata` is DEEP-merged (one level): later plugins' keys
-		//     win on conflict, but non-conflicting keys from earlier
-		//     plugins are preserved. metadata is the natural collision
-		//     point (every plugin wants to attach context) so deep merge
-		//     is what users expect.
-		//   - Every other top-level key is shallow-merged: later plugins
-		//     win wholesale. This is fine in practice because dedicated
-		//     keys like `replayEvents` have a single writer.
-		let enrichedSubmission: FeedbackSubmission = submission
-		if (pluginList.length > 0) {
-			const patchPromises = pluginList.map(async plugin => {
-				if (!plugin.onFeedbackSubmit) return undefined
-				const ctx = pluginContexts.get(plugin.name)
-				if (!ctx) return undefined
-				try {
-					return await plugin.onFeedbackSubmit(ctx, submission)
-				} catch (err) {
-					ctx.logger.error('onFeedbackSubmit threw', err)
-					return undefined
-				}
-			})
-			const patches = await Promise.all(patchPromises)
-			enrichedSubmission = mergePluginPatches(submission, patches)
-		}
-
 		try {
-			const response = await apiClient.submitFeedback(enrichedSubmission)
+			const response = await submitWithPlugins(apiClient, pluginRuntime, submission)
 			if (response.success) {
 				if (shareEmail && userEmail) writeStoredEmail(userEmail)
 				onSubmit?.(feedbackData)
@@ -961,27 +800,15 @@ export function initUseroFeedbackWidget(
 			destroyed = true
 			document.removeEventListener('keydown', onKeyDown)
 			detachMqlListener()
-			for (const plugin of pluginList) {
-				if (!plugin.onDestroy) continue
-				const ctx = pluginContexts.get(plugin.name)
-				if (!ctx) continue
-				try {
-					plugin.onDestroy(ctx)
-				} catch (err) {
-					ctx.logger.error('onDestroy threw', err)
-				}
-			}
-			pluginStores.clear()
-			pluginContexts.clear()
+			pluginRuntime.destroy()
 			host.remove()
 		},
 		open,
 		close,
-		whenReady: () => readyPromise,
+		whenReady: () => pluginRuntime.whenReady(),
 		identify: (user: UseroUser | null) => {
 			if (destroyed) return
-			currentUserProp = user
-			applyResolvedUser(user)
+			identity.identify(user)
 		},
 		update: next => {
 			if (destroyed) return
@@ -1029,16 +856,13 @@ export function initUseroFeedbackWidget(
 			if ('onError' in next) onError = next.onError
 			if ('onOpen' in next) onOpen = next.onOpen
 			if ('onClose' in next) onClose = next.onClose
-			if ('getUser' in next) getUserFn = next.getUser
+			if ('getUser' in next) identity.setGetUser(next.getUser)
 			// Identity: React wrapper hot-swaps `user` here on every render.
-			// applyResolvedUser dedupes via fingerprint, so passing the same
-			// user object is a no-op transport-wise. Track the latest prop
-			// so plugin-driven re-resolves (PluginContext.resolveUser) know
-			// to prefer the imperative path over getUserFn.
-			if ('user' in next) {
-				currentUserProp = next.user
-				applyResolvedUser(next.user)
-			}
+			// The identity handle dedupes (reference short-circuit plus
+			// fingerprint), so passing the same user object is a no-op
+			// transport-wise, and it tracks the latest prop so plugin-driven
+			// re-resolves prefer the imperative path over getUser.
+			if ('user' in next) identity.setUserProp(next.user)
 			if (needsRender) render()
 		},
 	}

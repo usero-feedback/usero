@@ -104,7 +104,33 @@ export default defineConfig([
 			js: format === 'cjs' ? '.cjs' : '.js',
 		}),
 	},
-	// 5. IIFE for <script> tag (vanilla only, no react)
+	// 5. Headless core -> ESM + CJS + types. The widget's submission,
+	// identity, and plugin pipeline with no UI, for consumers building
+	// their own feedback interface:
+	//   - headless        -> '@usero/sdk/headless' (framework-free)
+	//   - headless/react  -> useUseroFeedback hook (react external)
+	// No rrweb here: replay stays opt-in via the consumer passing
+	// sessionReplay() from '@usero/sdk/replay' into `plugins`. Splitting
+	// lets the two ESM entries share the core chunk (CJS inlines).
+	{
+		entry: {
+			headless: 'src/headless.ts',
+			'headless/react': 'src/headless-react.tsx',
+		},
+		format: ['esm', 'cjs'],
+		dts: true,
+		sourcemap: true,
+		clean: false,
+		treeshake: true,
+		splitting: true,
+		platform: 'browser',
+		target: 'es2020',
+		external: ['react', 'react-dom'],
+		outExtension: ({ format }) => ({
+			js: format === 'cjs' ? '.cjs' : '.js',
+		}),
+	},
+	// 6. IIFE for <script> tag (vanilla only, no react)
 	{
 		entry: { 'usero.iife': 'src/vanilla.ts' },
 		format: ['iife'],

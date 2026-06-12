@@ -17,7 +17,9 @@
 			"@usero/sdk/react": ["./dist/react.d.ts"],
 			"@usero/sdk/plugins/session-replay": ["./dist/plugins/session-replay.d.ts"],
 			"@usero/sdk/replay": ["./dist/replay.d.ts"],
-			"@usero/sdk/replay/react": ["./dist/replay/react.d.ts"]
+			"@usero/sdk/replay/react": ["./dist/replay/react.d.ts"],
+			"@usero/sdk/headless": ["./dist/headless.d.ts"],
+			"@usero/sdk/headless/react": ["./dist/headless/react.d.ts"]
 		}
 	},
 	"include": ["consumer.test.ts"]

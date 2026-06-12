@@ -15,6 +15,14 @@ import type { FeedbackWidgetProps as ReactProps } from '@usero/sdk/react'
 import { sessionReplay as sessionReplayCanonical } from '@usero/sdk/replay'
 import type { SessionReplayInstance } from '@usero/sdk/replay'
 import { useSessionReplay } from '@usero/sdk/replay/react'
+import { createUseroFeedback } from '@usero/sdk/headless'
+import type {
+	ScreenshotData,
+	SubmissionResponse,
+	SubmitFeedbackPayload,
+	UseroFeedbackController,
+} from '@usero/sdk/headless'
+import { useUseroFeedback } from '@usero/sdk/headless/react'
 
 declare const propsA: FeedbackWidgetProps
 declare const propsB: ReactProps
@@ -59,3 +67,38 @@ void sameFactory
 // The React hook subpath resolves and requires clientId at the type level.
 const _hook: typeof useSessionReplay = useSessionReplay
 void _hook
+
+// The headless subpath exposes the full custom-UI surface with types.
+const controller: UseroFeedbackController = createUseroFeedback({
+	clientId: 'client_123',
+	apiUrl: 'https://usero.io',
+	environment: 'staging',
+	metadata: { plan: 'pro' },
+	plugins: [sessionReplayCanonical()],
+	getUser: () => ({ id: 'u1', email: 'u1@example.com' }),
+})
+const submitResult: Promise<SubmissionResponse> = controller.submit({
+	rating: 4,
+	comment: 'great',
+	userEmail: 'u1@example.com',
+	screenshots: [] as ScreenshotData[],
+	metadata: { from: 'modal' },
+})
+void submitResult
+declare const screenshotFile: File
+const uploaded: Promise<ScreenshotData> = controller.uploadScreenshot(screenshotFile)
+void uploaded
+controller.identify({ id: 'u1', displayName: 'U One' })
+controller.identify(null)
+declare const shadow: ShadowRoot
+controller.notifyShadowMount(shadow)
+const headlessReady: Promise<void> = controller.whenReady()
+void headlessReady
+controller.destroy()
+const payload: SubmitFeedbackPayload = { comment: 'typed payload' }
+void payload
+
+// The headless React hook subpath resolves and returns the same controller
+// shape.
+const _headlessHook: typeof useUseroFeedback = useUseroFeedback
+void _headlessHook
