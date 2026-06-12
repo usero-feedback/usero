@@ -52,16 +52,26 @@ export default defineConfig([
 			js: format === 'cjs' ? '.cjs' : '.js',
 		}),
 	},
-	// 3. Session replay plugin -> ESM + CJS + types. Stays a separate
-	// subpath export so consumers who don't import it pay zero base-bundle
-	// cost. rrweb is bundled INTO this entry (`noExternal: ['rrweb']`) so
-	// `npm install @usero/sdk` is the only install step needed. rrweb is
-	// still lazy at runtime: the plugin uses `await import('rrweb')` behind
-	// an engagement gate, and `splitting: true` lets esbuild emit rrweb as
-	// a sibling chunk that only downloads when the dynamic import fires
-	// (CJS doesn't support splitting; rrweb inlines into the .cjs file).
+	// 3. Session replay -> ESM + CJS + types. Three entries share one config
+	// so esbuild code-splitting can hoist the shared implementation (and the
+	// rrweb runtime) into common chunks instead of duplicating them:
+	//   - replay                  -> '@usero/sdk/replay' (canonical)
+	//   - plugins/session-replay  -> back-compat alias, re-exports replay
+	//   - replay/react            -> useSessionReplay hook (react external)
+	// All stay separate subpath exports so consumers who don't import them
+	// pay zero base-bundle cost. rrweb is bundled INTO this config
+	// (`noExternal: ['rrweb']`) so `npm install @usero/sdk` is the only
+	// install step needed. rrweb is still lazy at runtime: the plugin uses
+	// `await import('rrweb')` behind an engagement gate, and
+	// `splitting: true` lets esbuild emit rrweb as a sibling chunk that only
+	// downloads when the dynamic import fires (CJS doesn't support
+	// splitting; shared code inlines into each .cjs file).
 	{
-		entry: { 'plugins/session-replay': 'src/plugins/session-replay.ts' },
+		entry: {
+			replay: 'src/replay.ts',
+			'plugins/session-replay': 'src/plugins/session-replay.ts',
+			'replay/react': 'src/replay-react.tsx',
+		},
 		format: ['esm', 'cjs'],
 		dts: true,
 		sourcemap: true,

@@ -12,6 +12,9 @@ import type {
 import { sessionReplay } from '@usero/sdk/plugins/session-replay'
 import { UseroFeedbackWidget } from '@usero/sdk/react'
 import type { FeedbackWidgetProps as ReactProps } from '@usero/sdk/react'
+import { sessionReplay as sessionReplayCanonical } from '@usero/sdk/replay'
+import type { SessionReplayInstance } from '@usero/sdk/replay'
+import { useSessionReplay } from '@usero/sdk/replay/react'
 
 declare const propsA: FeedbackWidgetProps
 declare const propsB: ReactProps
@@ -36,3 +39,23 @@ const replay: UseroPlugin = sessionReplay({
 	chunkSeconds: 10,
 })
 void replay
+
+// The canonical `@usero/sdk/replay` subpath returns the dual-mode instance:
+// usable as a widget plugin AND startable standalone.
+const standalone: SessionReplayInstance = sessionReplayCanonical({
+	clientId: 'client_123',
+	sampleRate: 1,
+	getUser: () => ({ id: 'u1', email: 'u1@example.com' }),
+})
+standalone.start()
+standalone.stop()
+const asPlugin: UseroPlugin = standalone
+void asPlugin
+
+// Both subpaths expose the same factory type.
+const sameFactory: typeof sessionReplayCanonical = sessionReplay
+void sameFactory
+
+// The React hook subpath resolves and requires clientId at the type level.
+const _hook: typeof useSessionReplay = useSessionReplay
+void _hook

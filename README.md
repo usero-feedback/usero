@@ -80,27 +80,63 @@ The widget auto-detects the OS color scheme via `prefers-color-scheme`. It picks
 | `onError`              | `(err: Error) => void`        | undefined                                     | Fires on init or submission error          |
 | `onOpen` / `onClose`   | `() => void`                  | undefined                                     | Fire when the panel opens/closes           |
 
-## Plugins
+## Session replay
 
-The widget has a tiny plugin API for opt-in features that would otherwise bloat the base bundle. Plugins live in subpath exports so the base widget stays small for everyone who doesn't use them.
+Record what your users actually did, with or without the feedback widget. Recording streams rrweb events to Usero in gzipped chunks while the user is on the page, so you capture whole sessions rather than only the moments around a feedback submission.
 
-### Session replay
+`rrweb` ships inside the replay chunk, so `npm install @usero/sdk` is the only install step. Replay lives in its own subpath export (`@usero/sdk/replay`), so consumers who never import it pay zero rrweb bytes on the base bundle. Even consumers who DO import it don't pay rrweb's bytes upfront: rrweb lazy-loads at runtime via dynamic import only once a recording actually starts.
 
-Attaches a rolling rrweb buffer (last 30 seconds by default) to each feedback submission, gzipped via the native CompressionStream API.
+### Standalone (no widget)
 
-`rrweb` ships inside the plugin chunk, so `npm install @usero/sdk` is the only install step. The plugin entry is a separate subpath export, so consumers who never `import` it pay zero rrweb bytes on the base bundle.
+```ts
+import { sessionReplay } from '@usero/sdk/replay'
+
+sessionReplay({ clientId: 'YOUR_CLIENT_ID' }).start()
+```
+
+That is the whole integration. No widget mounts, no UI renders, nothing is added to the DOM. If you know who the user is, pass `getUser` so replays show up under the right person:
+
+```ts
+const replay = sessionReplay({
+  clientId: 'YOUR_CLIENT_ID',
+  getUser: () => (auth.user ? { id: auth.user.id, email: auth.user.email } : null),
+})
+replay.start()
+
+// Optional: end the recording early. Flushes buffered events and
+// finalises the session server-side.
+replay.stop()
+```
+
+`getUser` is re-invoked at session start and at every chunk boundary, so a login that happens mid-session is picked up without any extra wiring. Returning `null` after a user was identified is treated as a logout.
+
+### React
+
+```tsx
+import { useSessionReplay } from '@usero/sdk/replay/react'
+
+function App() {
+  useSessionReplay({ clientId: 'YOUR_CLIENT_ID' })
+  return <Routes />
+}
+```
+
+The hook is SSR-safe (a no-op on the server), StrictMode-safe (the dev-mode double effect starts exactly one recording), and page-scoped: recording survives the component unmounting on client-side route changes, and ends when the page is hidden or closed. The hook returns the replay instance, so you can call `.stop()` to end a recording early. Options are captured on first render; to track a user who logs in mid-session, pass a `getUser` callback rather than changing options.
+
+### With the feedback widget
+
+Pass the same factory to the widget's `plugins` array. Feedback submissions then deep-link to the exact moment in the recording where the user hit submit.
 
 ```ts
 import { initUseroFeedbackWidget } from '@usero/sdk'
-import { sessionReplay } from '@usero/sdk/plugins/session-replay'
+import { sessionReplay } from '@usero/sdk/replay'
 
 initUseroFeedbackWidget({
   clientId: 'YOUR_CLIENT_ID',
   plugins: [
     sessionReplay({
-      bufferSeconds: 30,
-      // Wait 3s of engagement before loading rrweb. If the user navigates
-      // away first, rrweb is never fetched.
+      // Wait 3s after load before starting. If the user navigates away
+      // first, rrweb is never fetched and no session is created.
       startAfterMs: 3000,
       // Sample 50% of sessions. Decided once at init via Math.random().
       sampleRate: 0.5,
@@ -109,9 +145,21 @@ initUseroFeedbackWidget({
 })
 ```
 
-The base bundle (`@usero/sdk` and `@usero/sdk/react`) has zero rrweb references. Importing the plugin pulls in a separate chunk, and `rrweb` itself lazy-loads at runtime via dynamic import the first time the engagement gate elapses, so even consumers who DO opt into the plugin don't pay rrweb's bytes upfront.
+In plugin mode you don't pass `clientId`, `user`, or `getUser`: the widget's own configuration is authoritative.
 
-#### Privacy defaults
+The legacy import path `@usero/sdk/plugins/session-replay` still works and resolves to the same module. New code should import from `@usero/sdk/replay`.
+
+### One recording per page
+
+At most one replay recording runs per page, whichever way it was started. The rules:
+
+- `.start()` is idempotent. Calling it while a recording is live (from this instance or any other on the page) is a no-op, which is also what makes the React hook StrictMode-safe.
+- If a recording was started standalone and the feedback widget mounts later with a `sessionReplay()` plugin, the widget does NOT start a second recorder. It links to the running recording: feedback submissions deep-link into it, and the widget takes over user resolution while mounted.
+- A widget unmount never kills a recording it merely adopted; recordings are page-scoped.
+- `.stop()` flushes buffered events, finalises the session server-side, and tears down listeners. Calling `.start()` afterwards begins a new replay session.
+- `.start()` is a no-op without a `window` (SSR) and logs an error if no `clientId` was provided.
+
+### Privacy defaults
 
 | Option              | Default                | What it does                                                  |
 | ------------------- | ---------------------- | ------------------------------------------------------------- |
@@ -120,11 +168,16 @@ The base bundle (`@usero/sdk` and `@usero/sdk/react`) has zero rrweb references.
 | `blockSelector`     | `'[data-usero-block]'` | Skip recording subtrees entirely                              |
 | `inlineStylesheet`  | `true`                 | Inline external stylesheets so replays render offline         |
 | `sampling`          | `{ mousemove: 50, scroll: 100 }` | Throttle high-frequency events                  |
-| `bufferSeconds`     | `30`                   | Length of the rolling in-memory buffer in seconds             |
-| `startAfterMs`      | `0`                    | Engagement gate before loading rrweb                          |
+| `startAfterMs`      | `0`                    | Delay before loading rrweb and starting the session           |
 | `sampleRate`        | `1`                    | Probability (0..1) that a given session records at all        |
 
 Tag any DOM node you want masked at the source: `<div data-usero-mask>...</div>`. Tag entire subtrees you want skipped with `data-usero-block`.
+
+Standalone-only options: `clientId` (required for `.start()`), `user` / `getUser` (identify the current user), and `apiUrl` (override the API host, defaults to `https://usero.io`). Advanced chunking knobs (`chunkSeconds`, `chunkMaxEvents`, `chunkMaxBytes`, `chunkMaxAttempts`, `checkoutEveryMs`) are documented in the `SessionReplayOptions` type.
+
+## Plugins
+
+The widget has a tiny plugin API for opt-in features that would otherwise bloat the base bundle. Plugins live in subpath exports so the base widget stays small for everyone who doesn't use them. Session replay (above) is the flagship plugin; it doubles as a standalone recorder.
 
 ### Writing your own plugin
 
@@ -184,7 +237,7 @@ Outputs:
 
 - `dist/vanilla.js` (ESM) + `dist/vanilla.cjs` + `dist/vanilla.d.ts`
 - `dist/react.js` (ESM) + `dist/react.cjs` + `dist/react.d.ts`
-- `dist/plugins/session-replay.js` (ESM) + `.cjs` + `.d.ts` plus a sibling `dist/all-*.js` chunk that holds the bundled rrweb runtime. The plugin loads this chunk via dynamic `import()` so it only downloads when the plugin actually needs it.
+- `dist/replay.js` (ESM) + `.cjs` + `.d.ts` for `@usero/sdk/replay`, with `dist/plugins/session-replay.js` as a thin back-compat re-export and `dist/replay/react.js` for the `useSessionReplay` hook. The replay implementation lives in a shared `dist/chunk-*.js`, and the bundled rrweb runtime sits in a sibling `dist/rrweb-*.js` chunk loaded via dynamic `import()` only when a recording actually starts.
 - `dist/usero.iife.js` (minified, exposes `window.Usero`)
 
 ## WordPress plugin
