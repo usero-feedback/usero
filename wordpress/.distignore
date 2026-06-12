@@ -4,6 +4,7 @@
 
 .distignore
 .gitignore
+.wordpress-org/
 dev-artifacts/
 screenshots/
 SMOKE.md

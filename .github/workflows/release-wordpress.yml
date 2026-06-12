@@ -76,6 +76,18 @@ jobs:
             echo "::notice::wordpress.org SVN repo for slug '${SLUG}' does not exist yet (plugin still in review). Skipping deploy."
           fi
 
+      # The 10up action skips .distignore entirely when BUILD_DIR is set (it
+      # bare-rsyncs the whole dir into trunk), so stage a cleaned copy first.
+      # Must live inside the workspace: the action runs in its own container
+      # with only GITHUB_WORKSPACE mounted.
+      - name: Stage plugin files (apply .distignore)
+        if: steps.wporg.outputs.repo_exists == 'true'
+        run: |
+          rsync -rc --exclude-from=wordpress/.distignore wordpress/ plugin-build/
+          echo "Files going to trunk:"
+          find plugin-build -type f | sort
+          du -sh plugin-build
+
       - name: Deploy to wordpress.org
         if: steps.wporg.outputs.repo_exists == 'true'
         uses: 10up/action-wordpress-plugin-deploy@stable
@@ -83,6 +95,6 @@ jobs:
           SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
           SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
           SLUG: usero-feedback
-          BUILD_DIR: ./wordpress
-          ASSETS_DIR: ./wordpress/assets
+          BUILD_DIR: ./plugin-build
+          ASSETS_DIR: ./wordpress/.wordpress-org
           VERSION: ${{ steps.wporg.outputs.version }}
