@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.15
+
+Patch. No SDK code changes; WordPress listing polish for the now-live wordpress.org/plugins/usero-feedback directory page. readme.txt "Tested up to" bumped 6.5 to 7.0 after a full smoke test on WordPress 7.0 / PHP 8.4 via WordPress Playground (activation, front-end widget injection, admin settings page, zero PHP warnings with WP_DEBUG_LOG on), clearing the directory's "untested with the latest 3 major releases" warning. Also ships the new dark listing banner (committed separately in 14db3ff) to the SVN assets dir. No public API or wire-format changes.
+
 ## 1.1.14
 
 Patch. No SDK code changes; this release exists to publish the WordPress plugin to the just-approved wordpress.org directory listing (slug usero-feedback) with correct packaging. The WP.org listing images (icons, banners, screenshots) moved from wordpress/assets/ to wordpress/.wordpress-org/ so they no longer ship inside the install zip, and the SVN deploy workflow now stages a .distignore-cleaned copy of the plugin before handing it to the deploy action, which ignores .distignore when BUILD_DIR is set. The installable plugin shrinks from what would have been roughly 11MB (dev artifacts plus marketing images) to about 130KB of runtime files. No public API or wire-format changes.

@@ -1,6 +1,6 @@
 {
   "name": "@usero/sdk",
-  "version": "1.1.14",
+  "version": "1.1.15",
   "description": "Usero SDK. Drop-in feedback widget (vanilla JS, React, or script tag) plus future plugins like session replay. Zero config, framework-free, tiny.",
   "license": "MIT",
   "author": "Will Smith <will@willsmithte.com>",
