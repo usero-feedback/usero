@@ -1,6 +1,6 @@
 {
   "name": "@usero/sdk",
-  "version": "1.1.15",
+  "version": "1.2.0",
   "description": "Usero SDK. Drop-in feedback widget (vanilla JS, React, or script tag) plus future plugins like session replay. Zero config, framework-free, tiny.",
   "license": "MIT",
   "author": "Will Smith <will@willsmithte.com>",
@@ -28,6 +28,16 @@
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js",
       "require": "./dist/react.cjs"
+    },
+    "./replay": {
+      "types": "./dist/replay.d.ts",
+      "import": "./dist/replay.js",
+      "require": "./dist/replay.cjs"
+    },
+    "./replay/react": {
+      "types": "./dist/replay/react.d.ts",
+      "import": "./dist/replay/react.js",
+      "require": "./dist/replay/react.cjs"
     },
     "./plugins/session-replay": {
       "types": "./dist/plugins/session-replay.d.ts",
