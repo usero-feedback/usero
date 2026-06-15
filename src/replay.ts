@@ -335,6 +335,8 @@ async function createSession(
 			typeof window !== 'undefined' && window.location ? window.location.href : undefined
 		const userAgent =
 			typeof navigator !== 'undefined' && navigator.userAgent ? navigator.userAgent : undefined
+		const referrer =
+			typeof document !== 'undefined' && document.referrer ? document.referrer : undefined
 		const res = await fetch(joinUrl(apiUrl, '/api/replay-sessions'), {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
@@ -344,6 +346,7 @@ async function createSession(
 				anonymousId,
 				startUrl,
 				userAgent,
+				referrer,
 				startedAt: new Date().toISOString(),
 			}),
 		})
