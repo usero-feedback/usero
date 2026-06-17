@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.3
+
+Patch. Session replay never drops the FullSnapshot chunk. The playback anchor (rrweb type-2) is now exempt from both the upload-queue saturation buffer-clear and the 4MB hard cap, so heavy-DOM sessions no longer produce unplayable "Meta + incrementals, no snapshot" recordings. If an oversized snapshot upload still fails after retries, the loss is recorded as a viewer gap marker (`droppedSinceLastUpload`) instead of vanishing silently. Backwards compatible: no API or wire-format change, existing consumers need no changes.
+
 ## 1.3.2
 
 Patch. Session replay now scopes recordings to the configured `environment`, matching the value already used for feedback submissions. In widget and headless installs the host's `environment` flows through the shared plugin runtime onto each plugin's context, and the session-replay plugin forwards it to the create-session POST. In standalone mode `sessionReplay()` accepts a new optional `environment` option (the standalone value takes precedence over a widget-provided one). When the environment is unset the field is omitted from the POST body to `/api/replay-sessions`, so the server treats it as default/prod. Backwards compatible: the new option and context field are optional and existing consumers need no changes.

@@ -192,6 +192,11 @@ interface ReplayStore {
 	pendingBytes: number
 	pendingFirstTs: number | null
 	pendingLastTs: number | null
+	// True when the pending buffer holds a FullSnapshot (type 2). A
+	// snapshot-bearing chunk is the playback anchor for everything after it, so
+	// it is NEVER dropped on queue saturation or the 4MB cap: we'd rather block
+	// briefly / split than lose the anchor and leave an unplayable session.
+	pendingHasSnapshot: boolean
 	lastUploadDropWarnAt: number
 	// Count of chunks dropped (queue saturation) since the last successful
 	// upload. Sent as a header on the next successful chunk PUT so the
@@ -517,12 +522,18 @@ export function maybeIsolateSnapshot(
 function scheduleChunkUpload(store: ReplayStore, ctx: PluginContext): void {
 	if (!store.sessionReplayId) return
 	if (store.pendingEvents.length === 0) return
-	if (store.pendingUploads >= MAX_PENDING_UPLOADS) {
+	// Queue saturation. We bound memory by refusing to enqueue more work, but a
+	// snapshot-bearing buffer is the playback anchor and must NEVER be dropped:
+	// losing it makes every subsequent incremental unplayable. So we only drop
+	// NON-snapshot buffers here; a snapshot buffer falls through and is enqueued
+	// even past MAX_PENDING_UPLOADS (the queue is a serial promise chain, so this
+	// just means it waits its turn rather than racing memory up unboundedly).
+	if (store.pendingUploads >= MAX_PENDING_UPLOADS && !store.pendingHasSnapshot) {
 		const now = Date.now()
 		if (now - store.lastUploadDropWarnAt > UPLOAD_DROP_WARN_INTERVAL_MS) {
 			store.lastUploadDropWarnAt = now
 			ctx.logger.warn(
-				`upload queue full (${store.pendingUploads} in-flight), dropping chunk to bound memory`,
+				`upload queue full (${store.pendingUploads} in-flight), dropping non-snapshot chunk to bound memory`,
 			)
 		}
 		store.pendingEvents = []
@@ -546,12 +557,14 @@ function scheduleChunkUpload(store: ReplayStore, ctx: PluginContext): void {
 	const firstTs = store.pendingFirstTs ?? 0
 	const lastTs = store.pendingLastTs ?? firstTs
 	const durationMs = Math.max(0, lastTs - firstTs)
+	const hasSnapshot = store.pendingHasSnapshot
 	const seq = store.nextChunkSeq
 	store.nextChunkSeq += 1
 	store.pendingEvents = []
 	store.pendingBytes = 0
 	store.pendingFirstTs = null
 	store.pendingLastTs = null
+	store.pendingHasSnapshot = false
 
 	const sessionReplayId = store.sessionReplayId
 	const apiUrl = store.options.apiUrl
@@ -566,14 +579,28 @@ function scheduleChunkUpload(store: ReplayStore, ctx: PluginContext): void {
 			const json = JSON.stringify(events)
 			const bytes = await gzipBytes(json)
 			if (bytes.byteLength > HARD_CHUNK_BYTE_CAP) {
-				ctx.logger.error(
-					`chunk ${seq} exceeds 4MB hard cap (${bytes.byteLength} bytes), dropping`,
-				)
-				// Surface the drop on the next successful chunk so the viewer
-				// can render a gap marker. Without this, oversized chunks
-				// vanish without trace server-side.
-				store.droppedSinceLastUpload += 1
-				return
+				// A snapshot chunk is the playback anchor: dropping it leaves
+				// every following incremental unplayable, which is exactly the
+				// "Meta + incrementals, no snapshot" ghost row we're fixing.
+				// Snapshot isolation already ships snapshots near-empty, so a
+				// >4MB gzipped snapshot is pathological; still, attempt the
+				// upload rather than discard the anchor. The server route caps
+				// at MAX_CHUNK_BYTES and will 413 if it truly can't take it, but
+				// we never voluntarily throw the anchor away.
+				if (hasSnapshot) {
+					ctx.logger.error(
+						`snapshot chunk ${seq} exceeds 4MB hard cap (${bytes.byteLength} bytes); uploading anyway to preserve the playback anchor`,
+					)
+				} else {
+					ctx.logger.error(
+						`chunk ${seq} exceeds 4MB hard cap (${bytes.byteLength} bytes), dropping`,
+					)
+					// Surface the drop on the next successful chunk so the viewer
+					// can render a gap marker. Without this, oversized chunks
+					// vanish without trace server-side.
+					store.droppedSinceLastUpload += 1
+					return
+				}
 			}
 			const result = await uploadChunk(
 				apiUrl,
@@ -587,6 +614,12 @@ function scheduleChunkUpload(store: ReplayStore, ctx: PluginContext): void {
 				maxAttempts,
 				droppedBefore,
 			)
+			if (hasSnapshot && !result.ok) {
+				// We uploaded an oversized snapshot chunk anyway to preserve the
+				// anchor, but the upload still failed after retries. The anchor
+				// is lost, so record a gap for the viewer just like a real drop.
+				store.droppedSinceLastUpload += 1
+			}
 			if (result.ok && droppedBefore > 0) {
 				// Subtract what we just reported, rather than zeroing, so any
 				// drops that happened while this chunk was in flight still
@@ -754,6 +787,11 @@ function startRecording(store: ReplayStore, ctx: PluginContext): void {
 					// incrementals. See the helper's doc comment for details.
 					const { didIsolate } = maybeIsolateSnapshot(store, ctx, event, Date.now())
 					store.pendingEvents.push(event)
+					if (event.type === RRWEB_EVENT_TYPE_FULL_SNAPSHOT) {
+						// Mark this buffer as snapshot-bearing so scheduleChunkUpload
+						// refuses to drop it on saturation or the 4MB cap.
+						store.pendingHasSnapshot = true
+					}
 					// Hot path: rrweb fires hundreds of events/sec on busy SPAs.
 					// JSON.stringify-per-event burns CPU we don't have, and .length
 					// is UTF-16 units (under-counts non-ASCII by ~2x) so it was
@@ -1046,6 +1084,7 @@ export function sessionReplay(options: SessionReplayOptions = {}): SessionReplay
 				pendingBytes: 0,
 				pendingFirstTs: null,
 				pendingLastTs: null,
+				pendingHasSnapshot: false,
 				lastUploadDropWarnAt: 0,
 				droppedSinceLastUpload: 0,
 				lastSnapshotFlushAt: 0,
