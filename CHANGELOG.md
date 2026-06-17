@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.4
+
+Patch. Session replay no longer crashes on rrweb's emit path. An `errorHandler` is now passed to `record()`, so a throw inside a single event emit is logged and swallowed instead of aborting the whole recording. This guards the known case where the adoptedStyleSheets observer fires an incremental snapshot before the first FullSnapshot exists, making rrweb's checkout branch read `lastFullSnapshotEvent.timestamp` on `undefined` (TypeError: Cannot read properties of undefined). Backwards compatible: no API or wire-format change, the emitted event stream is unchanged, existing consumers need no changes.
+
 ## 1.3.3
 
 Patch. Session replay never drops the FullSnapshot chunk. The playback anchor (rrweb type-2) is now exempt from both the upload-queue saturation buffer-clear and the 4MB hard cap, so heavy-DOM sessions no longer produce unplayable "Meta + incrementals, no snapshot" recordings. If an oversized snapshot upload still fails after retries, the loss is recorded as a viewer gap marker (`droppedSinceLastUpload`) instead of vanishing silently. Backwards compatible: no API or wire-format change, existing consumers need no changes.

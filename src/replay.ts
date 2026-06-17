@@ -149,6 +149,10 @@ interface RrwebRecordOptions {
 	blockSelector?: string
 	sampling?: ReplaySampling
 	checkoutEveryNms?: number
+	// rrweb's ErrorHandler: returning true marks the error handled so rrweb
+	// does not rethrow / stop recording. Matches the alpha.20 type
+	// `(error: unknown) => void | boolean`.
+	errorHandler?: (error: unknown) => void | boolean
 }
 
 interface RrwebRecordFn {
@@ -819,6 +823,17 @@ function startRecording(store: ReplayStore, ctx: PluginContext): void {
 				blockSelector: store.options.blockSelector,
 				sampling: store.options.sampling,
 				checkoutEveryNms: store.options.checkoutEveryMs,
+				// Swallow throws on rrweb's emit path so a single bad event can't
+				// abort the whole recording. The known offender: the
+				// adoptedStyleSheets observer can fire an incremental snapshot
+				// before the first FullSnapshot exists, so the checkout branch
+				// reads lastFullSnapshotEvent.timestamp on undefined and throws
+				// (TypeError: Cannot read properties of undefined). Returning
+				// true marks the error handled so rrweb does not rethrow and stop.
+				errorHandler: (error: unknown): boolean => {
+					ctx.logger.warn('rrweb emit error swallowed', error)
+					return true
+				},
 			})
 			store.stopRecording = stop
 			store.record = record
