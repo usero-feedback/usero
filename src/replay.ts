@@ -130,6 +130,9 @@ export interface SessionReplayOptions {
 	// boundaries so a mid-session login is picked up without any extra
 	// wiring. Return null/undefined while logged out.
 	getUser?: () => UseroUser | null | undefined
+	// Standalone mode: the environment to scope this recording to, same
+	// concept as the widget's `environment` prop. Omitted means default/prod.
+	environment?: string
 }
 
 interface RrwebEvent {
@@ -324,11 +327,23 @@ interface CreateSessionResult {
 	dropReason?: string
 }
 
+interface CreateSessionBody {
+	clientId: string
+	sdkSessionId: string
+	anonymousId: string
+	startUrl?: string
+	userAgent?: string
+	referrer?: string
+	startedAt: string
+	environment?: string
+}
+
 async function createSession(
 	apiUrl: string,
 	clientId: string,
 	sdkSessionId: string,
 	anonymousId: string,
+	environment?: string,
 ): Promise<CreateSessionResult | null> {
 	try {
 		const startUrl =
@@ -337,18 +352,20 @@ async function createSession(
 			typeof navigator !== 'undefined' && navigator.userAgent ? navigator.userAgent : undefined
 		const referrer =
 			typeof document !== 'undefined' && document.referrer ? document.referrer : undefined
+		const body: CreateSessionBody = {
+			clientId,
+			sdkSessionId,
+			anonymousId,
+			startUrl,
+			userAgent,
+			referrer,
+			startedAt: new Date().toISOString(),
+		}
+		if (environment !== undefined) body.environment = environment
 		const res = await fetch(joinUrl(apiUrl, '/api/replay-sessions'), {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({
-				clientId,
-				sdkSessionId,
-				anonymousId,
-				startUrl,
-				userAgent,
-				referrer,
-				startedAt: new Date().toISOString(),
-			}),
+			body: JSON.stringify(body),
 		})
 		if (!res.ok) return null
 		const json = (await res.json()) as {
@@ -883,11 +900,13 @@ function createStandaloneContext(
 	apiUrl: string,
 	logger: ReturnType<typeof createPluginLogger>,
 	resolveUser: () => void,
+	environment?: string,
 ): PluginContext {
 	let store: unknown
 	return {
 		clientId,
 		baseUrl: apiUrl,
+		environment,
 		logger,
 		getStore: <T,>() => store as T | undefined,
 		setStore: <T,>(value: T) => {
@@ -935,7 +954,13 @@ function createStandaloneUserResolver(
 export function sessionReplay(options: SessionReplayOptions = {}): SessionReplayInstance {
 	// Standalone-only options never reach ResolvedOptions; the rest merge
 	// over the defaults exactly as before.
-	const { clientId: standaloneClientId, user, getUser, ...replayOptions } = options
+	const {
+		clientId: standaloneClientId,
+		user,
+		getUser,
+		environment: standaloneEnvironment,
+		...replayOptions
+	} = options
 	const merged: ResolvedOptions = {
 		...DEFAULTS,
 		...replayOptions,
@@ -1100,7 +1125,11 @@ export function sessionReplay(options: SessionReplayOptions = {}): SessionReplay
 				// that ran in a later plugin's onInit is reflected here.
 				const sdkSessionId = resolveSdkSessionId()
 				store.sdkSessionId = sdkSessionId
-				const created = await createSession(apiUrl, ctx.clientId, sdkSessionId, anonymousId)
+				// Precedence: the standalone option wins if set, else the
+				// widget-provided environment from PluginContext. Either may be
+				// absent, in which case createSession omits it (server defaults).
+				const env = standaloneEnvironment ?? ctx.environment
+				const created = await createSession(apiUrl, ctx.clientId, sdkSessionId, anonymousId, env)
 				if (!created) {
 					ctx.logger.warn('session create failed, replay disabled')
 					store.stopped = true
@@ -1245,9 +1274,15 @@ export function sessionReplay(options: SessionReplayOptions = {}): SessionReplay
 				{ apiUrl, clientId: standaloneClientId },
 				{ user, getUser },
 			)
-			const ctx = createStandaloneContext(standaloneClientId, apiUrl, standaloneLogger, () => {
-				;(resolveUserDelegate ?? resolveStandaloneUser)()
-			})
+			const ctx = createStandaloneContext(
+				standaloneClientId,
+				apiUrl,
+				standaloneLogger,
+				() => {
+					;(resolveUserDelegate ?? resolveStandaloneUser)()
+				},
+				standaloneEnvironment,
+			)
 			phase = 'running'
 			startedAs = 'standalone'
 			startWithContext(ctx)

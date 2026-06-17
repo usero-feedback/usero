@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.2
+
+Patch. Session replay now scopes recordings to the configured `environment`, matching the value already used for feedback submissions. In widget and headless installs the host's `environment` flows through the shared plugin runtime onto each plugin's context, and the session-replay plugin forwards it to the create-session POST. In standalone mode `sessionReplay()` accepts a new optional `environment` option (the standalone value takes precedence over a widget-provided one). When the environment is unset the field is omitted from the POST body to `/api/replay-sessions`, so the server treats it as default/prod. Backwards compatible: the new option and context field are optional and existing consumers need no changes.
+
 ## 1.3.1
 
 Patch. Session replay now captures `document.referrer` (where the visitor came from) when creating a session, mirroring the feedback flow which already records the referrer. `createSession()` in the replay core reads `document.referrer` (guarded for non-browser environments and skipped when empty) and includes it as `referrer` in the POST body to `/api/replay-sessions`. Backwards compatible: the field is optional and existing consumers need no changes.

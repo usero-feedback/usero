@@ -30,6 +30,12 @@ export interface PluginLogger {
 export interface PluginContext {
 	clientId: string
 	baseUrl: string
+	// The host-configured environment (same value used for feedback
+	// submissions). Plugins that do their own ingest (e.g. session-replay
+	// create-session) should forward it so recordings are env-scoped
+	// server-side. Optional so older hosts and test doubles still satisfy
+	// the contract; absent means default/prod.
+	environment?: string
 	// Per-plugin scratch store. Plugins can stash state across hook calls
 	// without leaking into globals. The key is the plugin's `name`.
 	getStore: <T>() => T | undefined

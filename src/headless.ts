@@ -137,6 +137,7 @@ export function createUseroFeedback(
 		apiUrl,
 		plugins: options.plugins ?? [],
 		resolveUser: () => identity.resolveUser(),
+		environment: options.environment,
 	})
 
 	let destroyed = false

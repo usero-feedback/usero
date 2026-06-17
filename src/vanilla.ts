@@ -214,6 +214,7 @@ export function initUseroFeedbackWidget(
 		apiUrl: baseUrl ?? DEFAULT_API_URL,
 		plugins: props.plugins ?? [],
 		resolveUser: () => identity.resolveUser(),
+		environment,
 	})
 
 	// State

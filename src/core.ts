@@ -194,6 +194,11 @@ export interface PluginRuntimeOptions {
 	// Exposed to plugins via PluginContext.resolveUser so e.g. the replay
 	// plugin can re-poll user state at chunk boundaries.
 	resolveUser: () => void
+	// Host-configured environment (same value used for feedback submissions).
+	// Threaded onto each plugin's PluginContext so plugins that do their own
+	// ingest (e.g. session-replay create-session) can env-scope server-side.
+	// Optional: absent means default/prod.
+	environment?: string
 }
 
 export interface PluginRuntime {
@@ -212,7 +217,7 @@ export interface PluginRuntime {
 }
 
 export function createPluginRuntime(options: PluginRuntimeOptions): PluginRuntime {
-	const { clientId, apiUrl, plugins, resolveUser } = options
+	const { clientId, apiUrl, plugins, resolveUser, environment } = options
 	// Plugin registry. Each plugin gets its own context with a private store.
 	// `onInit` is fired non-blocking so a slow plugin can't delay the host.
 	// Errors are caught so a misbehaving plugin can't tear the host down or
@@ -225,6 +230,7 @@ export function createPluginRuntime(options: PluginRuntimeOptions): PluginRuntim
 		const ctx: PluginContext = {
 			clientId,
 			baseUrl: apiUrl,
+			environment,
 			logger: createPluginLogger(plugin.name),
 			getStore: <T,>() => pluginStores.get(plugin.name) as T | undefined,
 			setStore: <T,>(value: T) => {
