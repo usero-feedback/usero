@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Usero What's New Smoke Test</title>
+		<style>
+			body {
+				font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+				margin: 0;
+				padding: 32px 20px 120px;
+				color: #111;
+				background: #f7f7f8;
+			}
+			.wrap {
+				max-width: 640px;
+				margin: 0 auto;
+				background: #fff;
+				border-radius: 16px;
+				padding: 28px 24px;
+				box-shadow: 0 6px 20px rgba(0, 0, 0, 0.06);
+			}
+			h1 {
+				margin: 0 0 8px;
+				font-size: 22px;
+			}
+			p, li {
+				color: #4b5563;
+				line-height: 1.5;
+			}
+			code {
+				background: #f1f1f3;
+				padding: 2px 6px;
+				border-radius: 4px;
+				font-size: 13px;
+			}
+			button.reset {
+				background: #111;
+				color: #fff;
+				border: none;
+				padding: 8px 14px;
+				border-radius: 8px;
+				cursor: pointer;
+				font-weight: 600;
+			}
+		</style>
+	</head>
+	<body>
+		<div class="wrap">
+			<h1>Usero What's New Smoke Test</h1>
+			<p>
+				Mounts the widget with <code>whatsNew: true</code>. By default it points at a local
+				Usero dev server on <code>http://localhost:5271</code>. No dev server? Run the stub
+				and add <code>?baseUrl=http://localhost:5273</code> to this page's URL:
+			</p>
+			<p><code>node examples/whats-new-stub-server.mjs</code></p>
+			<p>Then check:</p>
+			<ol>
+				<li>A red unread dot appears on the launcher (first visit: everything unread).</li>
+				<li>Open the panel: a Feedback / What's new tab header is present, with an unread count badge.</li>
+				<li>Switch to What's new: a pinned "Shipped for you" section (the stub returns one for the identified email) sits above the entry list; titles with URLs open in a new tab.</li>
+				<li>Close and reopen: the dot and badge are gone (opening the view marked all seen).</li>
+				<li>Click the button below to clear the last-seen key and reload; the dot returns.</li>
+			</ol>
+			<p>
+				<button class="reset" id="reset">Clear last-seen + reload</button>
+			</p>
+		</div>
+
+		<script type="module">
+			import { initUseroFeedbackWidget } from "../dist/vanilla.js"
+
+			const clientId = "whats-new-demo"
+			const baseUrl =
+				new URLSearchParams(location.search).get("baseUrl") ?? "http://localhost:5271"
+
+			const widget = initUseroFeedbackWidget({
+				clientId,
+				baseUrl,
+				whatsNew: true,
+				user: { id: "demo-user", email: "demo@example.com" },
+			})
+
+			// Expose for console poking: widget.openWhatsNew(), widget.open(), ...
+			window.__widget = widget
+
+			document.getElementById("reset").addEventListener("click", () => {
+				localStorage.removeItem(`usero:whats-new:last-seen:${clientId}`)
+				location.reload()
+			})
+		</script>
+	</body>
+</html>

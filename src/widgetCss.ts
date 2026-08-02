@@ -415,6 +415,147 @@ export const FEEDBACK_CSS = `
   opacity: 0.6;
 }
 
+/* What's new: launcher unread dot. Anchored to the visible half of the
+   half-offscreen launcher (right-positioned buttons show their left edge
+   and vice versa). Functional placeholder; designer pass owns the look. */
+.fb-wn-dot {
+  position: absolute;
+  top: 9px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #ef4444;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9);
+}
+.fb-btn--right .fb-wn-dot { left: 9px; }
+.fb-btn--left .fb-wn-dot { right: 9px; }
+
+/* What's new: panel tabs */
+.fb-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.fb-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 6px 10px 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  opacity: 0.65;
+  display: inline-flex;
+  align-items: center;
+}
+.fb-tab--active {
+  opacity: 1;
+}
+.fb-tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  margin-left: 6px;
+  border-radius: 8px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* What's new: entries view */
+.fb-wn {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-bottom: 8px;
+}
+.fb-wn-yours {
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.fb-wn-sec-ttl {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.fb-wn-yours-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.fb-wn-item-ttl {
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.fb-wn-link:hover {
+  text-decoration: underline;
+}
+.fb-wn-quote {
+  font-size: 13px;
+  font-style: italic;
+  padding-left: 8px;
+  opacity: 0.85;
+}
+.fb-wn-pr {
+  font-size: 12px;
+  opacity: 0.65;
+}
+.fb-wn-list {
+  display: flex;
+  flex-direction: column;
+}
+.fb-wn-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 0;
+}
+.fb-wn-item:last-child {
+  border-bottom: none !important;
+}
+.fb-wn-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fb-wn-type {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 99px;
+  opacity: 0.8;
+}
+.fb-wn-date {
+  font-size: 12px;
+  opacity: 0.6;
+}
+.fb-wn-excerpt {
+  font-size: 13px;
+  line-height: 1.4;
+  opacity: 0.8;
+}
+.fb-wn-board {
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  align-self: flex-start;
+}
+.fb-wn-board:hover {
+  text-decoration: underline;
+}
+
 @media (max-width: 768px) {
   .fb-pnl-base {
     width: 100% !important;

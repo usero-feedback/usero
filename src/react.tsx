@@ -92,6 +92,7 @@ export function UseroFeedbackWidget(props: FeedbackWidgetProps): null {
 		}
 		if (props.environment !== undefined) updates.environment = props.environment
 		if (props.metadata !== undefined) updates.metadata = props.metadata
+		if (props.whatsNew !== undefined) updates.whatsNew = props.whatsNew
 		handle.update(updates)
 		// theme/metadata compared by serialized identity since they're
 		// objects; primitives use direct dep tracking.
@@ -104,6 +105,7 @@ export function UseroFeedbackWidget(props: FeedbackWidgetProps): null {
 		props.showScreenshotOption,
 		props.environment,
 		metadataJson,
+		props.whatsNew,
 	])
 
 	// Identity: diff the resolved user by id + email + serialised traits.

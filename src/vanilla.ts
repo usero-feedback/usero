@@ -36,6 +36,13 @@ import {
 	type WidgetTheme,
 } from './types'
 import { validateFeedbackSubmission } from './validation'
+import {
+	__test__ as whatsNewTestHooks,
+	fetchWhatsNewFeed,
+	getUnreadCount,
+	markAllSeen,
+	type WhatsNewFeed,
+} from './whatsNew'
 import { FEEDBACK_CSS } from './widgetCss'
 
 export {
@@ -49,6 +56,17 @@ export {
 // Not part of the public API; used by tests/identity-sdk-session.test.mjs to
 // exercise reseatSdkSessionId, the resume-across-hard-nav replay-link fix.
 export const __identityTest__ = identityTestHooks
+
+// Test-only re-export of the what's-new module's pure logic (bundled into
+// this entry, no standalone dist file). Not part of the public API; used
+// by tests/whats-new.test.mjs.
+export const __whatsNewTest__ = whatsNewTestHooks
+
+export type {
+	WhatsNewEntry,
+	WhatsNewFeed,
+	WhatsNewYours,
+} from './whatsNew'
 
 // Pick the base theme to merge user overrides onto, based on the OS color
 // scheme. Defaults to dark when matchMedia is unavailable (SSR, old browsers)
@@ -106,6 +124,10 @@ export interface UseroWidgetHandle {
 	// Plugins with synchronous `onInit` make this resolve on the next
 	// microtask. If no plugins are registered, it resolves immediately.
 	whenReady: () => Promise<void>
+	// Open the panel directly on the What's new view. No-ops back to the
+	// regular feedback view when `whatsNew` is off or the feed is empty /
+	// failed to load (the panel still opens).
+	openWhatsNew: () => void
 }
 
 const EMAIL_STORAGE_KEY = 'feedback_user_email'
@@ -161,6 +183,7 @@ export function initUseroFeedbackWidget(
 			update: () => {},
 			whenReady: () => Promise.resolve(),
 			identify: () => {},
+			openWhatsNew: () => {},
 		}
 	}
 
@@ -176,6 +199,7 @@ export function initUseroFeedbackWidget(
 			update: () => {},
 			whenReady: () => Promise.resolve(),
 			identify: () => {},
+			openWhatsNew: () => {},
 		}
 	}
 
@@ -195,7 +219,28 @@ export function initUseroFeedbackWidget(
 	let onError: FeedbackWidgetProps['onError'] = props.onError
 	let onOpen: FeedbackWidgetProps['onOpen'] = props.onOpen
 	let onClose: FeedbackWidgetProps['onClose'] = props.onClose
+	let whatsNewEnabled: boolean = props.whatsNew ?? false
 	const apiClient = new FeedbackApiClient(baseUrl)
+
+	// Last-seen user refs, tracked alongside the identity handle so the
+	// what's-new fetch can attach the identified user's email. `undefined`
+	// means "no user prop supplied, defer to getUser"; `null` means
+	// explicitly logged out.
+	let lastKnownUser: UseroUser | null | undefined = props.user
+	let getUserRef: FeedbackWidgetProps['getUser'] = props.getUser
+
+	function resolveWhatsNewEmail(): string | undefined {
+		if (lastKnownUser) return lastKnownUser.email
+		if (lastKnownUser === null) return undefined
+		if (getUserRef) {
+			try {
+				return getUserRef()?.email
+			} catch {
+				return undefined
+			}
+		}
+		return undefined
+	}
 
 	// Identity resolution lives in the shared core (same logic drives
 	// `@usero/sdk/headless`): user-prop-over-getUser precedence, reference
@@ -229,6 +274,14 @@ export function initUseroFeedbackWidget(
 	let screenshots: ScreenshotData[] = []
 	let isUploadingScreenshot = false
 	let screenshotError: string | null = null
+
+	// What's-new state. The feed is fetched at most once per widget
+	// instance (no polling in v1). `null` feed means "not loaded yet, or
+	// load failed, or feature off": all render sites treat it as absent.
+	let whatsNewFeed: WhatsNewFeed | null = null
+	let whatsNewUnread = 0
+	let whatsNewFetchStarted = false
+	let activeView: 'feedback' | 'whats-new' = 'feedback'
 
 	const MAX_SCREENSHOTS = 3
 	const MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024 // 10MB, matches old React widget
@@ -300,6 +353,7 @@ export function initUseroFeedbackWidget(
 		isOpen = true
 		focusCommentNext = true
 		// Reset transient state
+		activeView = 'feedback'
 		selectedRating = undefined
 		comment = ''
 		shareEmail = false
@@ -368,6 +422,44 @@ export function initUseroFeedbackWidget(
 		if (!isOpen) return
 		isOpen = false
 		onClose?.()
+		render()
+	}
+
+	// Fetch the what's-new feed once. Silent no-op on any failure or an
+	// empty feed: no dot, no tabs, widget behaves exactly as if the flag
+	// were off for this page view.
+	function loadWhatsNewFeed(): void {
+		if (!whatsNewEnabled || whatsNewFetchStarted) return
+		whatsNewFetchStarted = true
+		void (async () => {
+			const feed = await fetchWhatsNewFeed({
+				baseUrl: baseUrl ?? DEFAULT_API_URL,
+				clientId,
+				email: resolveWhatsNewEmail(),
+			})
+			if (destroyed) return
+			if (!feed || feed.entries.length === 0) return
+			whatsNewFeed = feed
+			whatsNewUnread = getUnreadCount(clientId, feed.entries)
+			renderButton()
+			// Refresh the panel only while it is closed, so the tab header is
+			// in place for the next open. A full render on an OPEN panel would
+			// rebuild the innerHTML and destroy any in-progress typing; in
+			// that (rare) case the tabs simply appear on the next render.
+			if (!isOpen) render()
+		})()
+	}
+
+	// Switch the open panel to the What's new view and mark everything as
+	// seen. No-op when the feature is off or the feed is absent/empty.
+	function openWhatsNewView(): void {
+		if (!whatsNewEnabled || !whatsNewFeed || whatsNewFeed.entries.length === 0) {
+			return
+		}
+		activeView = 'whats-new'
+		focusCommentNext = false
+		markAllSeen(clientId, whatsNewFeed.entries)
+		whatsNewUnread = 0
 		render()
 	}
 
@@ -526,15 +618,104 @@ export function initUseroFeedbackWidget(
 		buttonEl.setAttribute('aria-label', 'Open feedback')
 		buttonEl.type = 'button'
 		buttonEl.style.background = `linear-gradient(135deg, ${theme.primary}, ${getGradientEnd(theme.primary)})`
+		// Minimal unread indicator; hidden while the panel is open. The
+		// designer pass owns the final look.
+		const dotHtml =
+			whatsNewUnread > 0
+				? '<span class="fb-wn-dot" data-role="wn-dot" aria-hidden="true"></span>'
+				: ''
 		buttonEl.innerHTML = isOpen
 			? `<span style="font-size:20px;">✕</span>`
-			: ''
+			: dotHtml
 	}
 
 	function renderBackdrop(): void {
 		backdropEl.className = 'fb-backdrop'
 		backdropEl.style.display = isOpen ? 'block' : 'none'
 		backdropEl.setAttribute('aria-label', 'Close modal')
+	}
+
+	function formatEntryDate(iso: string): string {
+		const t = Date.parse(iso)
+		if (Number.isNaN(t)) return ''
+		try {
+			return new Date(t).toLocaleDateString(undefined, {
+				year: 'numeric',
+				month: 'short',
+				day: 'numeric',
+			})
+		} catch {
+			return ''
+		}
+	}
+
+	// Only ever emit http(s) links from feed data. Anything else (including
+	// javascript: URLs from a compromised or buggy backend) renders as
+	// plain text.
+	function safeHttpUrl(url: string | null): string | null {
+		if (!url) return null
+		return /^https?:\/\//i.test(url) ? url : null
+	}
+
+	// Functional layout only; the designer pass restyles this view.
+	function buildWhatsNewBodyHtml(feed: WhatsNewFeed): string {
+		const entryBySlug = new Map(feed.entries.map(e => [e.slug, e]))
+		const yoursItemsHtml = feed.yours
+			.map(item => {
+				const entry = entryBySlug.get(item.entrySlug)
+				const itemTitle = entry ? entry.title : item.prTitle
+				const quoteHtml = item.quote
+					? `<div class="fb-wn-quote" style="border-left:3px solid ${theme.primary};color:${theme.text}">"${escapeHtml(item.quote)}"</div>`
+					: ''
+				return `
+					<div class="fb-wn-yours-item">
+						<div class="fb-wn-item-ttl" style="color:${theme.text}">${escapeHtml(itemTitle)}</div>
+						${quoteHtml}
+						<div class="fb-wn-pr" style="color:${theme.text}">Shipped via ${escapeHtml(item.prTitle)}</div>
+					</div>
+				`
+			})
+			.join('')
+		const yoursSectionHtml =
+			feed.yours.length > 0
+				? `<div class="fb-wn-yours" style="border:1px solid ${theme.border}">
+						<div class="fb-wn-sec-ttl" style="color:${theme.primary}">Shipped for you</div>
+						${yoursItemsHtml}
+					</div>`
+				: ''
+		const entriesHtml = feed.entries
+			.map(entry => {
+				const url = safeHttpUrl(entry.url)
+				const titleHtml = url
+					? `<a class="fb-wn-item-ttl fb-wn-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" style="color:${theme.text}">${escapeHtml(entry.title)}</a>`
+					: `<div class="fb-wn-item-ttl" style="color:${theme.text}">${escapeHtml(entry.title)}</div>`
+				const date = formatEntryDate(entry.publishedAt)
+				const excerptHtml = entry.excerpt
+					? `<div class="fb-wn-excerpt" style="color:${theme.text}">${escapeHtml(entry.excerpt)}</div>`
+					: ''
+				return `
+					<div class="fb-wn-item" style="border-bottom:1px solid ${theme.border}">
+						<div class="fb-wn-meta">
+							<span class="fb-wn-type" style="border:1px solid ${theme.border};color:${theme.text}">${escapeHtml(entry.type)}</span>
+							${date ? `<span class="fb-wn-date" style="color:${theme.text}">${escapeHtml(date)}</span>` : ''}
+						</div>
+						${titleHtml}
+						${excerptHtml}
+					</div>
+				`
+			})
+			.join('')
+		const boardUrl = safeHttpUrl(feed.boardUrl)
+		const boardLinkHtml = boardUrl
+			? `<a class="fb-wn-board" href="${escapeHtml(boardUrl)}" target="_blank" rel="noopener noreferrer" style="color:${theme.primary}">See all updates</a>`
+			: ''
+		return `
+			<div class="fb-wn">
+				${yoursSectionHtml}
+				<div class="fb-wn-list">${entriesHtml}</div>
+				${boardLinkHtml}
+			</div>
+		`
 	}
 
 	function renderPanel(): void {
@@ -605,14 +786,25 @@ export function initUseroFeedbackWidget(
 		const submitDisabled = isSubmitting
 		const submitStyle = `background:linear-gradient(135deg, ${theme.primary}, ${getGradientEnd(theme.primary)});color:#ffffff;${submitDisabled ? 'opacity:0.6;cursor:not-allowed;' : ''}`
 
-		panelEl.innerHTML = `
-			<div class="fb-cnt">
-				<div class="fb-hdr" style="border-bottom:1px solid ${theme.border}">
-					<h2 id="usero-feedback-title" class="fb-ttl" style="color:${theme.text}">${escapeHtml(title)}</h2>
-					${messageHtml}
-					<button class="fb-close-btn" data-role="close" style="color:${theme.text}" aria-label="Close" type="button">✕</button>
+		// Two-tab header, only when the what's-new feature has entries to
+		// show. Minimal structure by design; the designer pass restyles it.
+		const showTabs =
+			whatsNewEnabled && whatsNewFeed !== null && whatsNewFeed.entries.length > 0
+		const isWhatsNewView = showTabs && activeView === 'whats-new'
+		const tabsHtml = showTabs
+			? `
+				<div class="fb-tabs" role="tablist" aria-label="Widget views" style="border-bottom:1px solid ${theme.border}">
+					<button type="button" class="fb-tab ${!isWhatsNewView ? 'fb-tab--active' : ''}" data-role="tab-feedback" role="tab" aria-selected="${!isWhatsNewView}" style="color:${theme.text};${!isWhatsNewView ? `border-bottom-color:${theme.primary};` : ''}">Feedback</button>
+					<button type="button" class="fb-tab ${isWhatsNewView ? 'fb-tab--active' : ''}" data-role="tab-whats-new" role="tab" aria-selected="${isWhatsNewView}" style="color:${theme.text};${isWhatsNewView ? `border-bottom-color:${theme.primary};` : ''}">What&#x27;s new${whatsNewUnread > 0 ? `<span class="fb-tab-badge">${whatsNewUnread}</span>` : ''}</button>
 				</div>
-				<form data-role="form">
+			`
+			: ''
+
+		const headerTitle = isWhatsNewView ? "What's new" : title
+		const bodyHtml =
+			isWhatsNewView && whatsNewFeed !== null
+				? buildWhatsNewBodyHtml(whatsNewFeed)
+				: `<form data-role="form">
 					<div class="fb-es" role="radiogroup" aria-label="Rate experience">${ratingsHtml}</div>
 					<textarea class="fb-ta" data-role="comment" placeholder="${escapeHtml(placeholder)}" aria-label="Comments" maxlength="1000" rows="2" style="border:1px solid ${theme.border};color:${theme.text};background-color:${theme.background};">${escapeHtml(comment)}</textarea>
 					<div class="fb-toolrow">
@@ -625,9 +817,37 @@ export function initUseroFeedbackWidget(
 						${isSubmitting ? '<span class="fb-spin"></span>' : ''}
 						${isSubmitting ? 'Submitting...' : 'Send Feedback 🚀'}
 					</button>
-				</form>
+				</form>`
+
+		panelEl.innerHTML = `
+			<div class="fb-cnt">
+				${tabsHtml}
+				<div class="fb-hdr" style="border-bottom:1px solid ${theme.border}">
+					<h2 id="usero-feedback-title" class="fb-ttl" style="color:${theme.text}">${escapeHtml(headerTitle)}</h2>
+					${isWhatsNewView ? '' : messageHtml}
+					<button class="fb-close-btn" data-role="close" style="color:${theme.text}" aria-label="Close" type="button">✕</button>
+				</div>
+				${bodyHtml}
 			</div>
 		`
+
+		// Tab switching. Selectors are null when tabs are not rendered, so
+		// this wiring is a no-op in the plain-feedback layout. The rest of
+		// the wiring below is already null-safe (optional chaining / empty
+		// NodeLists), so it degrades cleanly in the what's-new view.
+		panelEl
+			.querySelector<HTMLButtonElement>('button[data-role="tab-feedback"]')
+			?.addEventListener('click', () => {
+				if (activeView === 'feedback') return
+				activeView = 'feedback'
+				render()
+			})
+		panelEl
+			.querySelector<HTMLButtonElement>('button[data-role="tab-whats-new"]')
+			?.addEventListener('click', () => {
+				if (activeView === 'whats-new') return
+				openWhatsNewView()
+			})
 
 		// Wire up panel-internal events
 		const form = panelEl.querySelector<HTMLFormElement>('form[data-role="form"]')
@@ -795,6 +1015,11 @@ export function initUseroFeedbackWidget(
 	render()
 
 	let destroyed = false
+
+	// Kick off the what's-new fetch (no-op when the flag is off). Runs
+	// after the initial identify resolve above, so the identified email is
+	// available to attach to the request.
+	loadWhatsNewFeed()
 	return {
 		destroy: () => {
 			if (destroyed) return
@@ -809,7 +1034,13 @@ export function initUseroFeedbackWidget(
 		whenReady: () => pluginRuntime.whenReady(),
 		identify: (user: UseroUser | null) => {
 			if (destroyed) return
+			lastKnownUser = user
 			identity.identify(user)
+		},
+		openWhatsNew: () => {
+			if (destroyed) return
+			open()
+			openWhatsNewView()
 		},
 		update: next => {
 			if (destroyed) return
@@ -850,6 +1081,15 @@ export function initUseroFeedbackWidget(
 				showScreenshotOption = next.showScreenshotOption
 				needsRender = true
 			}
+			if (next.whatsNew !== undefined && next.whatsNew !== whatsNewEnabled) {
+				whatsNewEnabled = next.whatsNew
+				if (whatsNewEnabled) {
+					loadWhatsNewFeed()
+				} else if (activeView === 'whats-new') {
+					activeView = 'feedback'
+				}
+				needsRender = true
+			}
 			// Non-render-affecting props: just swap refs.
 			if ('environment' in next) environment = next.environment
 			if ('metadata' in next) metadata = next.metadata
@@ -857,13 +1097,19 @@ export function initUseroFeedbackWidget(
 			if ('onError' in next) onError = next.onError
 			if ('onOpen' in next) onOpen = next.onOpen
 			if ('onClose' in next) onClose = next.onClose
-			if ('getUser' in next) identity.setGetUser(next.getUser)
+			if ('getUser' in next) {
+				getUserRef = next.getUser
+				identity.setGetUser(next.getUser)
+			}
 			// Identity: React wrapper hot-swaps `user` here on every render.
 			// The identity handle dedupes (reference short-circuit plus
 			// fingerprint), so passing the same user object is a no-op
 			// transport-wise, and it tracks the latest prop so plugin-driven
 			// re-resolves prefer the imperative path over getUser.
-			if ('user' in next) identity.setUserProp(next.user)
+			if ('user' in next) {
+				lastKnownUser = next.user
+				identity.setUserProp(next.user)
+			}
 			if (needsRender) render()
 		},
 	}

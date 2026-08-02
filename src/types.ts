@@ -101,6 +101,12 @@ export interface FeedbackWidgetProps {
 	// invokes both.
 	user?: UseroUser | null
 	getUser?: () => UseroUser | null | undefined
+	// Opt-in "What's new" feed. When true, the SDK fetches the client's
+	// published changelog once at init (with the identified user's email
+	// when available), shows an unread dot on the launcher, and adds a
+	// second "What's new" view inside the panel. Default off. All feed
+	// failures are silent no-ops; the widget never breaks the host page.
+	whatsNew?: boolean
 	onSubmit?: (feedback: FeedbackData) => void
 	onError?: (error: Error) => void
 	onOpen?: () => void
