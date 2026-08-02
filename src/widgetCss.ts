@@ -415,100 +415,156 @@ export const FEEDBACK_CSS = `
   opacity: 0.6;
 }
 
+/* Visually hidden, kept for screen readers (dialog label in tabbed views). */
+.fb-vh {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* What's new: launcher unread dot. Anchored to the visible half of the
    half-offscreen launcher (right-positioned buttons show their left edge
-   and vice versa). Functional placeholder; designer pass owns the look. */
+   and vice versa). White keyline separates it from the launcher gradient
+   in both themes; a slow ping halo draws the eye without nagging. */
+@keyframes fb-wn-ping {
+  0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.45); }
+  70%, 100% { box-shadow: 0 0 0 7px rgba(239, 68, 68, 0); }
+}
 .fb-wn-dot {
   position: absolute;
-  top: 9px;
-  width: 10px;
-  height: 10px;
+  top: 8px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   background: #ef4444;
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9);
+  border: 2px solid #ffffff;
+  box-sizing: content-box;
+  animation: fb-wn-ping 2.6s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
-.fb-btn--right .fb-wn-dot { left: 9px; }
-.fb-btn--left .fb-wn-dot { right: 9px; }
+.fb-btn--right .fb-wn-dot { left: 7px; }
+.fb-btn--left .fb-wn-dot { right: 7px; }
+@media (prefers-reduced-motion: reduce) {
+  .fb-wn-dot { animation: none; }
+}
 
-/* What's new: panel tabs */
+/* What's new: panel tabs. Underline style so the row reads as one header;
+   the active tab's 2px underline overlaps the row's 1px hairline. */
 .fb-tabs {
   display: flex;
-  gap: 4px;
-  margin-bottom: 10px;
+  align-items: center;
+  gap: 18px;
+  margin-bottom: 14px;
 }
 .fb-tab {
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
-  padding: 6px 10px 8px;
-  font-size: 14px;
+  margin-bottom: -1px;
+  padding: 2px 1px 10px;
+  font-size: 13.5px;
   font-weight: 600;
+  letter-spacing: 0.01em;
   cursor: pointer;
   font-family: inherit;
-  opacity: 0.65;
+  opacity: 0.55;
   display: inline-flex;
   align-items: center;
+  transition: opacity 150ms ease;
 }
-.fb-tab--active {
+.fb-tab:hover {
+  opacity: 0.85;
+}
+.fb-tab--active,
+.fb-tab--active:hover {
   opacity: 1;
+}
+.fb-tabs .fb-close-btn {
+  margin-left: auto;
+  margin-bottom: 7px;
 }
 .fb-tab-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  margin-left: 6px;
-  border-radius: 8px;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  margin-left: 7px;
+  border-radius: 9px;
   background: #ef4444;
   color: #fff;
   font-size: 11px;
   font-weight: 700;
+  line-height: 1;
 }
 
 /* What's new: entries view */
 .fb-wn {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding-bottom: 8px;
+  gap: 4px;
+  padding-bottom: 6px;
 }
+
+/* Shipped for you: the hero card. Primary-tinted surface so it inherits
+   the client's accent color in any theme. */
 .fb-wn-yours {
-  border-radius: 10px;
-  padding: 10px 12px;
+  border-radius: 12px;
+  padding: 14px 16px 13px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 14px;
+  margin-bottom: 10px;
 }
 .fb-wn-sec-ttl {
-  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.08em;
+}
+.fb-wn-sec-ttl svg {
+  flex: none;
 }
 .fb-wn-yours-item {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-}
-.fb-wn-item-ttl {
-  font-size: 14px;
-  font-weight: 600;
-  text-decoration: none;
-}
-.fb-wn-link:hover {
-  text-decoration: underline;
+  gap: 7px;
 }
 .fb-wn-quote {
   font-size: 13px;
   font-style: italic;
-  padding-left: 8px;
-  opacity: 0.85;
+  line-height: 1.5;
+  padding-left: 10px;
+  opacity: 0.9;
 }
 .fb-wn-pr {
-  font-size: 12px;
-  opacity: 0.65;
+  font-size: 11.5px;
+  opacity: 0.7;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.fb-wn-pr-title {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 500;
+}
+.fb-wn-item-ttl {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-decoration: none;
+}
+.fb-wn-link:hover {
+  text-decoration: underline;
 }
 .fb-wn-list {
   display: flex;
@@ -517,11 +573,15 @@ export const FEEDBACK_CSS = `
 .fb-wn-item {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 10px 0;
+  gap: 5px;
+  padding: 13px 0;
+}
+.fb-wn-item:first-child {
+  padding-top: 4px;
 }
 .fb-wn-item:last-child {
   border-bottom: none !important;
+  padding-bottom: 6px;
 }
 .fb-wn-meta {
   display: flex;
@@ -532,28 +592,64 @@ export const FEEDBACK_CSS = `
   font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  padding: 1px 6px;
+  letter-spacing: 0.06em;
+  padding: 2px 7px;
   border-radius: 99px;
-  opacity: 0.8;
+  background: rgba(107, 114, 128, 0.12);
+  line-height: 1.4;
+}
+.fb-wn-type--new {
+  background: rgba(37, 99, 235, 0.1);
+  color: #2563eb;
+}
+.fb-wn-type--improvement {
+  background: rgba(16, 185, 129, 0.12);
+  color: #047857;
+}
+.fb-wn-type--fix {
+  background: rgba(245, 158, 11, 0.15);
+  color: #b45309;
+}
+.fb-wn--dark .fb-wn-type--new {
+  background: rgba(96, 165, 250, 0.16);
+  color: #93c5fd;
+}
+.fb-wn--dark .fb-wn-type--improvement {
+  background: rgba(52, 211, 153, 0.14);
+  color: #6ee7b7;
+}
+.fb-wn--dark .fb-wn-type--fix {
+  background: rgba(251, 191, 36, 0.14);
+  color: #fcd34d;
 }
 .fb-wn-date {
   font-size: 12px;
-  opacity: 0.6;
+  opacity: 0.55;
 }
 .fb-wn-excerpt {
   font-size: 13px;
-  line-height: 1.4;
-  opacity: 0.8;
+  line-height: 1.45;
+  opacity: 0.75;
 }
 .fb-wn-board {
   font-size: 13px;
   font-weight: 600;
   text-decoration: none;
   align-self: flex-start;
+  margin-top: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 .fb-wn-board:hover {
   text-decoration: underline;
+}
+.fb-wn-board-arrow {
+  display: inline-block;
+  transition: transform 150ms ease;
+}
+.fb-wn-board:hover .fb-wn-board-arrow {
+  transform: translateX(2px);
 }
 
 @media (max-width: 768px) {

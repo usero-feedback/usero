@@ -70,15 +70,16 @@
 		<script type="module">
 			import { initUseroFeedbackWidget } from "../dist/vanilla.js"
 
-			const clientId = "whats-new-demo"
-			const baseUrl =
-				new URLSearchParams(location.search).get("baseUrl") ?? "http://localhost:5271"
+			const params = new URLSearchParams(location.search)
+			const clientId = params.get("clientId") ?? "dev-client"
+			const baseUrl = params.get("baseUrl") ?? "http://localhost:5271"
+			const email = params.get("email") ?? "reporter@example.com"
 
 			const widget = initUseroFeedbackWidget({
 				clientId,
 				baseUrl,
 				whatsNew: true,
-				user: { id: "demo-user", email: "demo@example.com" },
+				user: { id: email, email },
 			})
 
 			// Expose for console poking: widget.openWhatsNew(), widget.open(), ...

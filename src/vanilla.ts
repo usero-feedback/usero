@@ -657,29 +657,65 @@ export function initUseroFeedbackWidget(
 		return /^https?:\/\//i.test(url) ? url : null
 	}
 
-	// Functional layout only; the designer pass restyles this view.
+	// Map a feed entry type onto one of the three designed badge variants.
+	// Unknown types fall back to the neutral badge with the theme text color.
+	function typeBadgeClass(type: string): string {
+		const t = type.toLowerCase()
+		if (t === 'new' || t === 'feature' || t === 'release') return 'fb-wn-type--new'
+		if (t === 'improvement' || t === 'improved') return 'fb-wn-type--improvement'
+		if (t === 'fix' || t === 'bugfix') return 'fb-wn-type--fix'
+		return ''
+	}
+
+	// Rough luminance check on the theme background so the what's-new view
+	// can swap in higher-contrast badge colors on dark themes. Non-6-digit
+	// hex backgrounds default to the light palette.
+	function isDarkBackground(background: string): boolean {
+		const hex = background.trim()
+		if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return false
+		const r = parseInt(hex.slice(1, 3), 16)
+		const g = parseInt(hex.slice(3, 5), 16)
+		const b = parseInt(hex.slice(5, 7), 16)
+		return 0.2126 * r + 0.7152 * g + 0.0722 * b < 128
+	}
+
+	// Primary-tinted background + border for the Shipped-for-you card.
+	// color-mix inherits whatever accent the client configured; the rgba
+	// declarations before it are a fallback for pre-color-mix browsers.
+	function primaryTintStyle(): string {
+		return (
+			`background:rgba(37,99,235,0.06);` +
+			`background:color-mix(in srgb, ${theme.primary} 7%, transparent);` +
+			`border:1px solid rgba(37,99,235,0.22);` +
+			`border:1px solid color-mix(in srgb, ${theme.primary} 24%, transparent);`
+		)
+	}
+
 	function buildWhatsNewBodyHtml(feed: WhatsNewFeed): string {
 		const entryBySlug = new Map(feed.entries.map(e => [e.slug, e]))
 		const yoursItemsHtml = feed.yours
 			.map(item => {
 				const entry = entryBySlug.get(item.entrySlug)
 				const itemTitle = entry ? entry.title : item.prTitle
+				// Their words first, then the thing that shipped in answer to
+				// them, then the PR that carried it (mono, quietly code-shaped).
 				const quoteHtml = item.quote
-					? `<div class="fb-wn-quote" style="border-left:3px solid ${theme.primary};color:${theme.text}">"${escapeHtml(item.quote)}"</div>`
+					? `<div class="fb-wn-quote" style="border-left:2px solid ${theme.primary};color:${theme.text}">&#x201C;${escapeHtml(item.quote)}&#x201D;</div>`
 					: ''
 				return `
 					<div class="fb-wn-yours-item">
-						<div class="fb-wn-item-ttl" style="color:${theme.text}">${escapeHtml(itemTitle)}</div>
 						${quoteHtml}
-						<div class="fb-wn-pr" style="color:${theme.text}">Shipped via ${escapeHtml(item.prTitle)}</div>
+						<div class="fb-wn-item-ttl" style="color:${theme.text}">${escapeHtml(itemTitle)}</div>
+						<div class="fb-wn-pr" style="color:${theme.text}">Shipped in: <span class="fb-wn-pr-title">${escapeHtml(item.prTitle)}</span></div>
 					</div>
 				`
 			})
 			.join('')
+		const checkIcon = `<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="8" fill="${theme.primary}"></circle><path d="M4.6 8.3 7 10.7l4.4-5.2" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg>`
 		const yoursSectionHtml =
 			feed.yours.length > 0
-				? `<div class="fb-wn-yours" style="border:1px solid ${theme.border}">
-						<div class="fb-wn-sec-ttl" style="color:${theme.primary}">Shipped for you</div>
+				? `<div class="fb-wn-yours" style="${primaryTintStyle()}">
+						<div class="fb-wn-sec-ttl" style="color:${theme.primary}">${checkIcon}Shipped for you</div>
 						${yoursItemsHtml}
 					</div>`
 				: ''
@@ -690,13 +726,15 @@ export function initUseroFeedbackWidget(
 					? `<a class="fb-wn-item-ttl fb-wn-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" style="color:${theme.text}">${escapeHtml(entry.title)}</a>`
 					: `<div class="fb-wn-item-ttl" style="color:${theme.text}">${escapeHtml(entry.title)}</div>`
 				const date = formatEntryDate(entry.publishedAt)
+				const badgeClass = typeBadgeClass(entry.type)
+				const badgeStyle = badgeClass === '' ? ` style="color:${theme.text}"` : ''
 				const excerptHtml = entry.excerpt
 					? `<div class="fb-wn-excerpt" style="color:${theme.text}">${escapeHtml(entry.excerpt)}</div>`
 					: ''
 				return `
 					<div class="fb-wn-item" style="border-bottom:1px solid ${theme.border}">
 						<div class="fb-wn-meta">
-							<span class="fb-wn-type" style="border:1px solid ${theme.border};color:${theme.text}">${escapeHtml(entry.type)}</span>
+							<span class="fb-wn-type ${badgeClass}"${badgeStyle}>${escapeHtml(entry.type)}</span>
 							${date ? `<span class="fb-wn-date" style="color:${theme.text}">${escapeHtml(date)}</span>` : ''}
 						</div>
 						${titleHtml}
@@ -707,10 +745,10 @@ export function initUseroFeedbackWidget(
 			.join('')
 		const boardUrl = safeHttpUrl(feed.boardUrl)
 		const boardLinkHtml = boardUrl
-			? `<a class="fb-wn-board" href="${escapeHtml(boardUrl)}" target="_blank" rel="noopener noreferrer" style="color:${theme.primary}">See all updates</a>`
+			? `<a class="fb-wn-board" href="${escapeHtml(boardUrl)}" target="_blank" rel="noopener noreferrer" style="color:${theme.primary}">See all updates<span class="fb-wn-board-arrow" aria-hidden="true">&#8594;</span></a>`
 			: ''
 		return `
-			<div class="fb-wn">
+			<div class="fb-wn${isDarkBackground(theme.background) ? ' fb-wn--dark' : ''}">
 				${yoursSectionHtml}
 				<div class="fb-wn-list">${entriesHtml}</div>
 				${boardLinkHtml}
@@ -787,20 +825,38 @@ export function initUseroFeedbackWidget(
 		const submitStyle = `background:linear-gradient(135deg, ${theme.primary}, ${getGradientEnd(theme.primary)});color:#ffffff;${submitDisabled ? 'opacity:0.6;cursor:not-allowed;' : ''}`
 
 		// Two-tab header, only when the what's-new feature has entries to
-		// show. Minimal structure by design; the designer pass restyles it.
+		// show. The close button lives inside the tab row (top-right, stable
+		// across tab switches); without tabs, it stays in the classic header.
 		const showTabs =
 			whatsNewEnabled && whatsNewFeed !== null && whatsNewFeed.entries.length > 0
 		const isWhatsNewView = showTabs && activeView === 'whats-new'
+		const closeBtnHtml = `<button class="fb-close-btn" data-role="close" style="color:${theme.text}" aria-label="Close" type="button">✕</button>`
 		const tabsHtml = showTabs
 			? `
 				<div class="fb-tabs" role="tablist" aria-label="Widget views" style="border-bottom:1px solid ${theme.border}">
 					<button type="button" class="fb-tab ${!isWhatsNewView ? 'fb-tab--active' : ''}" data-role="tab-feedback" role="tab" aria-selected="${!isWhatsNewView}" style="color:${theme.text};${!isWhatsNewView ? `border-bottom-color:${theme.primary};` : ''}">Feedback</button>
 					<button type="button" class="fb-tab ${isWhatsNewView ? 'fb-tab--active' : ''}" data-role="tab-whats-new" role="tab" aria-selected="${isWhatsNewView}" style="color:${theme.text};${isWhatsNewView ? `border-bottom-color:${theme.primary};` : ''}">What&#x27;s new${whatsNewUnread > 0 ? `<span class="fb-tab-badge">${whatsNewUnread}</span>` : ''}</button>
+					${closeBtnHtml}
 				</div>
 			`
 			: ''
 
-		const headerTitle = isWhatsNewView ? "What's new" : title
+		// With tabs, the active tab already labels the view: the what's-new
+		// view keeps only a visually-hidden heading for the dialog label, and
+		// the feedback view keeps its (customizable) title without a second
+		// hairline or a duplicate close button.
+		const headerHtml = showTabs
+			? isWhatsNewView
+				? `<h2 id="usero-feedback-title" class="fb-vh">What&#x27;s new</h2>`
+				: `<div class="fb-hdr">
+						<h2 id="usero-feedback-title" class="fb-ttl" style="color:${theme.text}">${escapeHtml(title)}</h2>
+						${messageHtml}
+					</div>`
+			: `<div class="fb-hdr" style="border-bottom:1px solid ${theme.border}">
+					<h2 id="usero-feedback-title" class="fb-ttl" style="color:${theme.text}">${escapeHtml(title)}</h2>
+					${messageHtml}
+					${closeBtnHtml}
+				</div>`
 		const bodyHtml =
 			isWhatsNewView && whatsNewFeed !== null
 				? buildWhatsNewBodyHtml(whatsNewFeed)
@@ -822,11 +878,7 @@ export function initUseroFeedbackWidget(
 		panelEl.innerHTML = `
 			<div class="fb-cnt">
 				${tabsHtml}
-				<div class="fb-hdr" style="border-bottom:1px solid ${theme.border}">
-					<h2 id="usero-feedback-title" class="fb-ttl" style="color:${theme.text}">${escapeHtml(headerTitle)}</h2>
-					${isWhatsNewView ? '' : messageHtml}
-					<button class="fb-close-btn" data-role="close" style="color:${theme.text}" aria-label="Close" type="button">✕</button>
-				</div>
+				${headerHtml}
 				${bodyHtml}
 			</div>
 		`
