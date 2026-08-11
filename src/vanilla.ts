@@ -110,6 +110,21 @@ export interface UseroWidgetHandle {
 
 const EMAIL_STORAGE_KEY = 'feedback_user_email'
 
+// In-progress form state, keyed by clientId. Lives at module level so a
+// draft survives both close/reopen of the panel AND a full destroy +
+// re-init of the widget (e.g. a React host remounting the wrapper on a
+// route change or Suspense retry). Deliberately in-memory only: a hard
+// page reload drops it, which matches user expectations for an unsent
+// popup form, and nothing typed ever touches storage.
+interface WidgetDraft {
+	rating: FeedbackRating | undefined
+	comment: string
+	shareEmail: boolean
+	screenshots: ScreenshotData[]
+}
+
+const widgetDrafts = new Map<string, WidgetDraft>()
+
 function escapeHtml(value: string): string {
 	return value.replace(/[&<>"']/g, ch => {
 		switch (ch) {
@@ -217,18 +232,37 @@ export function initUseroFeedbackWidget(
 		environment,
 	})
 
-	// State
+	// State. Draft fields (rating, comment, shareEmail, screenshots) seed
+	// from any saved draft for this clientId so an accidental close or a
+	// host-driven re-init never wipes what the user typed.
+	const savedDraft = widgetDrafts.get(clientId)
 	let isOpen = false
 	let focusCommentNext = false
-	let selectedRating: FeedbackRating | undefined = undefined
-	let comment = ''
-	let shareEmail = false
+	let selectedRating: FeedbackRating | undefined = savedDraft?.rating
+	let comment = savedDraft?.comment ?? ''
+	let shareEmail = savedDraft?.shareEmail ?? false
 	let userEmail = readStoredEmail()
 	let isSubmitting = false
 	let submitMessage: { type: 'success' | 'error'; text: string } | null = null
-	let screenshots: ScreenshotData[] = []
+	let screenshots: ScreenshotData[] = savedDraft ? [...savedDraft.screenshots] : []
 	let isUploadingScreenshot = false
 	let screenshotError: string | null = null
+
+	// Persist (or clear) the draft for this clientId. Called on close and
+	// destroy; a draft with nothing in it clears the entry so a reopened
+	// widget after a successful submit starts fresh.
+	function saveDraft(): void {
+		if (selectedRating === undefined && comment.trim() === '' && screenshots.length === 0) {
+			widgetDrafts.delete(clientId)
+			return
+		}
+		widgetDrafts.set(clientId, {
+			rating: selectedRating,
+			comment,
+			shareEmail,
+			screenshots: [...screenshots],
+		})
+	}
 
 	const MAX_SCREENSHOTS = 3
 	const MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024 // 10MB, matches old React widget
@@ -299,12 +333,14 @@ export function initUseroFeedbackWidget(
 		if (isOpen) return
 		isOpen = true
 		focusCommentNext = true
-		// Reset transient state
-		selectedRating = undefined
-		comment = ''
-		shareEmail = false
+		// Reset transient state only. Draft fields (rating, comment,
+		// shareEmail, screenshots) deliberately survive close/reopen: the
+		// panel can be dismissed by a stray Escape or backdrop tap (or the
+		// whole widget re-inited by a host re-render), and wiping the
+		// user's in-progress text on reopen turns that into data loss.
+		// Drafts clear on successful submit, so a post-success reopen
+		// still starts fresh.
 		submitMessage = null
-		screenshots = []
 		screenshotError = null
 		isUploadingScreenshot = false
 		apiClient.ping()
@@ -367,6 +403,7 @@ export function initUseroFeedbackWidget(
 	function close(): void {
 		if (!isOpen) return
 		isOpen = false
+		saveDraft()
 		onClose?.()
 		render()
 	}
@@ -504,6 +541,7 @@ export function initUseroFeedbackWidget(
 				shareEmail = false
 				screenshots = []
 				screenshotError = null
+				widgetDrafts.delete(clientId)
 				submitMessage = { type: 'success', text: 'Thank you!' }
 			} else {
 				const msg = response.error ?? 'Error occurred. Try again.'
@@ -799,6 +837,10 @@ export function initUseroFeedbackWidget(
 		destroy: () => {
 			if (destroyed) return
 			destroyed = true
+			// A destroy is often a host re-render (React remounting the
+			// wrapper), not the user abandoning the form. Save the draft so
+			// the re-inited widget picks it back up.
+			saveDraft()
 			document.removeEventListener('keydown', onKeyDown)
 			detachMqlListener()
 			pluginRuntime.destroy()

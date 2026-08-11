@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.5
+
+Patch. The widget no longer loses in-progress feedback when the panel closes before submit. Previously, opening the panel reset every form field, so an accidental close (a stray Escape, a backdrop tap, or the host app re-rendering and remounting the widget) permanently wiped whatever the user had typed. Reported verbatim: "Modal just closes sometimes and I lose the text in it." Drafts (rating, comment, screenshots, share-email choice) now persist in memory per clientId across close/reopen and across destroy/re-init within the same page load, and clear after a successful submit so the next session starts fresh. No API or wire-format change.
+
 ## 1.3.4
 
 Patch. Session replay no longer crashes on rrweb's emit path. An `errorHandler` is now passed to `record()`, so a throw inside a single event emit is logged and swallowed instead of aborting the whole recording. This guards the known case where the adoptedStyleSheets observer fires an incremental snapshot before the first FullSnapshot exists, making rrweb's checkout branch read `lastFullSnapshotEvent.timestamp` on `undefined` (TypeError: Cannot read properties of undefined). Backwards compatible: no API or wire-format change, the emitted event stream is unchanged, existing consumers need no changes.
