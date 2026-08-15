@@ -2,7 +2,14 @@
 
 The canonical Usero feedback widget and session-replay SDK. Published to npm as `@usero/sdk`. Both a vanilla JS embed and a React wrapper.
 
-The companion server lives at `/Users/willy/projects/feedback` and is the source of the API contract this SDK speaks to.
+## Where this code lives (read this first)
+
+The source of truth is `widget/` inside the private feedback monorepo (`/Users/willy/projects/feedback`, repo `WillSmithTE/feedback`). The public repo `github.com/usero-feedback/usero` is a ONE-WAY MIRROR of that directory plus the npm publish surface: a workflow in the feedback repo (`.github/workflows/mirror-widget-to-public.yml`) rsyncs the tracked `widget/` source into the public repo on every push to main touching `widget/**` (plus a daily drift-healing cron). Nothing flows public to private.
+
+- All development happens in `feedback/widget/`. NEVER commit or push to the public repo directly (including from the legacy local checkout at `~/projects/usero`, which is read-only); the next mirror run would silently revert it.
+- The companion server is the same monorepo, one directory up. It is the source of the API contract this SDK speaks to.
+- `widget/` stays a standalone package: own `package.json`, own `package-lock.json`, own `node_modules`. It is NOT an npm workspace. The feedback repo's CI runs its typecheck/build/tests via `npm ci --prefix widget` when `widget/**` changes; the public repo's CI builds and tests again before publishing.
+- Migration plan and rationale: `docs/pm/tasks/widget-monorepo.md` in the monorepo.
 
 # Releasing
 
@@ -18,14 +25,14 @@ We've previously over-bumped (e.g. v0.4.0 for the declarative identify API, whic
 
 ## Release flow
 
-Pushing a version bump to `main` triggers `.github/workflows/publish.yml`, which runs `npm publish` with the repo's `NPM_TOKEN`. **You do not need to `npm publish` locally**, and the local user is not authenticated to the `@usero` scope.
+Publishing happens in the PUBLIC repo's `.github/workflows/publish.yml`, which triggers on a push to its `main` touching `package.json` and runs `npm publish --access public --provenance` via npm Trusted Publishing (OIDC). There is no `NPM_TOKEN` anywhere; provenance requires the public repo, which is why publishing stays there. **You do not need to `npm publish` locally**, and the local user is not authenticated to the `@usero` scope.
 
-1. Bump `version` in `package.json` (patch by default).
+1. In `feedback/widget/`: bump `version` in `package.json` (patch by default).
 2. Prepend a one-paragraph entry to `CHANGELOG.md`.
 3. `npm run typecheck` and `npm run build`.
-4. Commit `Release: @usero/sdk v<version>` (stage `package.json`, `package-lock.json`, `CHANGELOG.md` explicitly by path; no `git add -A`).
-5. Push to `main`. CI publishes within ~35s.
-6. Tag the release: `git tag v<version> && git push origin v<version>`.
+4. Commit `Release: @usero/sdk v<version>` (stage `widget/package.json`, `widget/package-lock.json`, `widget/CHANGELOG.md` explicitly by path; no `git add -A`).
+5. Push the feedback repo's `main`. The mirror workflow pushes the source to the public repo, whose publish workflow sees the `package.json` change and publishes. Its "already published?" guard makes no-version-change mirror pushes a no-op.
+6. The mirror workflow pushes the `v<version>` tag automatically when the version changed (this is what fires the WordPress release workflow). No manual tagging.
 7. Bump consumer repos (see below).
 
 Verify the publish landed: `npm view @usero/sdk version`.

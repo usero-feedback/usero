@@ -327,6 +327,10 @@ The plugin vendors the SDK's IIFE build at `wordpress/assets/js/vendor/usero-sdk
 
 To cut a plugin release see [`wordpress/RELEASE.md`](./wordpress/RELEASE.md). Tagging `v<version>` on GitHub triggers `.github/workflows/release-wordpress.yml`, which builds the SDK, verifies that `package.json`, `wordpress/usero.php`, and `wordpress/readme.txt` all agree on the version, then pushes to wordpress.org SVN via `10up/action-wordpress-plugin-deploy`.
 
+## Contributing
+
+This repository is a one-way mirror of the SDK source, which is developed in a private monorepo. Commits and pull requests made directly here will be overwritten by the next mirror sync. To report a bug or request a feature, please [open an issue](https://github.com/usero-feedback/usero/issues) instead.
+
 ## License
 
 MIT
