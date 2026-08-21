@@ -178,6 +178,53 @@ test('draft survives destroy and re-init, then submits the preserved text', asyn
 	second.destroy()
 })
 
+test('a host remount reopens the panel onto the draft', () => {
+	createdElements.length = 0
+	const first = initUseroFeedbackWidget({ clientId: 'client_draft_remount_open' })
+	first.open()
+	typeComment(findPanel(), DRAFT_TEXT)
+
+	first.destroy()
+	createdElements.length = 0
+
+	// No open() call: the panel was open when the host tore the widget down,
+	// so it must come back open rather than leaving the user staring at a
+	// closed launcher wondering where their text went.
+	const second = initUseroFeedbackWidget({ clientId: 'client_draft_remount_open' })
+	const panel = findPanel()
+	assert.ok(
+		panel.className.includes('fb-pnl--open'),
+		'panel should render open after a remount mid-draft',
+	)
+	assert.ok(
+		panel.innerHTML.includes(DRAFT_TEXT),
+		'reopened panel should still contain the typed comment',
+	)
+	second.destroy()
+})
+
+test('a panel the user closed stays closed after a remount', () => {
+	createdElements.length = 0
+	const first = initUseroFeedbackWidget({ clientId: 'client_draft_remount_closed' })
+	first.open()
+	typeComment(findPanel(), DRAFT_TEXT)
+	first.close()
+	first.destroy()
+	createdElements.length = 0
+
+	const second = initUseroFeedbackWidget({ clientId: 'client_draft_remount_closed' })
+	const panel = findPanel()
+	assert.ok(
+		panel.className.includes('fb-pnl--closed'),
+		'a deliberate dismiss must not be undone by a remount',
+	)
+	assert.ok(
+		panel.innerHTML.includes(DRAFT_TEXT),
+		'the draft text should still be waiting when reopened',
+	)
+	second.destroy()
+})
+
 test('successful submit clears the draft for the next session', () => {
 	// The previous test submitted successfully, so a fresh widget for the
 	// same clientId must start empty.

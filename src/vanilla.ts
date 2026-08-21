@@ -121,6 +121,10 @@ interface WidgetDraft {
 	comment: string
 	shareEmail: boolean
 	screenshots: ScreenshotData[]
+	// Whether the panel was open when the draft was saved. Restoring the
+	// text alone still reads as data loss if the panel itself disappears on
+	// a host re-render, so a re-inited widget reopens onto the draft.
+	isOpen: boolean
 }
 
 const widgetDrafts = new Map<string, WidgetDraft>()
@@ -236,7 +240,11 @@ export function initUseroFeedbackWidget(
 	// from any saved draft for this clientId so an accidental close or a
 	// host-driven re-init never wipes what the user typed.
 	const savedDraft = widgetDrafts.get(clientId)
-	let isOpen = false
+	// A saved draft that was open belongs to a widget the host tore down
+	// mid-typing (React remount), not to a user who dismissed the panel:
+	// close() records isOpen false. Come back up open so the panel does not
+	// silently vanish with the text still in it.
+	let isOpen = savedDraft?.isOpen ?? false
 	let focusCommentNext = false
 	let selectedRating: FeedbackRating | undefined = savedDraft?.rating
 	let comment = savedDraft?.comment ?? ''
@@ -261,6 +269,7 @@ export function initUseroFeedbackWidget(
 			comment,
 			shareEmail,
 			screenshots: [...screenshots],
+			isOpen,
 		})
 	}
 
@@ -831,6 +840,9 @@ export function initUseroFeedbackWidget(
 
 	// Initial paint
 	render()
+	// Restored onto an open draft: the panel markup is live from the first
+	// paint, so give recorders the same signal open() would have.
+	if (isOpen) notifyShadowUpdate('panel-open')
 
 	let destroyed = false
 	return {
