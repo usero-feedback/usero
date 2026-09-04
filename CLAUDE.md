@@ -33,13 +33,16 @@ Publishing happens in the PUBLIC repo's `.github/workflows/publish.yml`, which t
 4. Commit `Release: @usero/sdk v<version>` (stage `widget/package.json`, `widget/package-lock.json`, `widget/CHANGELOG.md` explicitly by path; no `git add -A`).
 5. Push the feedback repo's `main`. The mirror workflow pushes the source to the public repo, whose publish workflow sees the `package.json` change and publishes. Its "already published?" guard makes no-version-change mirror pushes a no-op.
 6. The mirror workflow pushes the `v<version>` tag automatically when the version changed (this is what fires the WordPress release workflow). No manual tagging.
-7. Bump consumer repos (see below).
+7. Bump consumer repos (see below). Always `feedback` (usero.io itself runs the latest SDK); every other consumer only when the
+   release is a decent-size change (see the policy at the top of the next section).
 
 Verify the publish landed: `npm view @usero/sdk version`.
 
 ## Consumer repos to bump after a release
 
-`@usero/sdk` (the canonical widget, includes rrweb session replay) is dogfooded across MANY of the user's projects, not just `feedback`. As of the last count it was ~18 repos and growing. **There is NO hardcoded consumer list. Do NOT bump "just feedback and feedback-reddit-ads" or any other remembered short list.** Default intent is BUMP EVERY CONSUMER. The grep below is the source of truth, re-run it every release:
+**Policy (Will, 2026-09-04): `feedback` is ALWAYS bumped, every release, no exceptions (usero.io dogfoods the latest SDK). The other consumers are bumped only when the release is a decent-size change**: new user-facing behaviour or option, a bugfix that affects consumers, a wire-format or rrweb change, a security fix. A patch that is a refactor, comment, docs, test-only, or dependency-housekeeping change bumps `feedback` only; the other repos pick it up next time. Judgement call, lean towards "not worth 16 repos of npm installs" for small patches. Say in the release report which policy branch applied.
+
+When a full sweep IS warranted: `@usero/sdk` (the canonical widget, includes rrweb session replay) is dogfooded across MANY of the user's projects. As of the last count it was 16 repos on main and growing. **There is NO hardcoded consumer list. Do NOT bump "just feedback and feedback-reddit-ads" or any other remembered short list.** The grep below is the source of truth, re-run it every sweep (note it also matches `*/widget/package.json` and `usero/package.json`, which are the SDK's own `name` field, not consumers; skip those):
 
 ```bash
 cd ~/projects
