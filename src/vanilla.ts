@@ -210,6 +210,8 @@ export function initUseroFeedbackWidget(
 	let showScreenshotOption: boolean = props.showScreenshotOption ?? true
 	let environment: string | undefined = props.environment
 	let metadata: Record<string, unknown> | undefined = props.metadata
+	let hideTrigger: boolean = props.hideTrigger ?? false
+	let disablePageContext: boolean = props.disablePageContext ?? false
 	let onSubmit: FeedbackWidgetProps['onSubmit'] = props.onSubmit
 	let onError: FeedbackWidgetProps['onError'] = props.onError
 	let onOpen: FeedbackWidgetProps['onOpen'] = props.onOpen
@@ -525,6 +527,7 @@ export function initUseroFeedbackWidget(
 			clientId,
 			environment,
 			metadata,
+			disablePageContext,
 			payload: {
 				rating: selectedRating,
 				comment,
@@ -576,6 +579,13 @@ export function initUseroFeedbackWidget(
 		buttonEl.innerHTML = isOpen
 			? `<span style="font-size:20px;">✕</span>`
 			: ''
+		// hideTrigger hides the default edge tab only; the panel, plugins,
+		// and the handle's open()/close() keep working so a host can drive
+		// the widget from its own UI. Hidden rather than unmounted so no
+		// conditional (un)listen logic is needed.
+		buttonEl.style.display = hideTrigger ? 'none' : ''
+		buttonEl.setAttribute('aria-hidden', hideTrigger ? 'true' : 'false')
+		buttonEl.tabIndex = hideTrigger ? -1 : 0
 	}
 
 	function renderBackdrop(): void {
@@ -904,9 +914,16 @@ export function initUseroFeedbackWidget(
 				showScreenshotOption = next.showScreenshotOption
 				needsRender = true
 			}
+			if (next.hideTrigger !== undefined && next.hideTrigger !== hideTrigger) {
+				hideTrigger = next.hideTrigger
+				needsRender = true
+			}
 			// Non-render-affecting props: just swap refs.
 			if ('environment' in next) environment = next.environment
 			if ('metadata' in next) metadata = next.metadata
+			if (next.disablePageContext !== undefined) {
+				disablePageContext = next.disablePageContext
+			}
 			if ('onSubmit' in next) onSubmit = next.onSubmit
 			if ('onError' in next) onError = next.onError
 			if ('onOpen' in next) onOpen = next.onOpen

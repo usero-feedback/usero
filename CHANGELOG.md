@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.0
+
+Minor. Two new opt-in privacy options, both default `false` with zero behaviour change for existing integrations. `disablePageContext` stops the widget capturing `pageUrl` / `pageTitle` / `referrer` on submit, for embeds where `document.title` or the URL can carry sensitive info (e.g. a desktop app shell whose title holds a connection name or file path). Available on the vanilla widget, the React widget, and the headless controller (`createUseroFeedback` / `useUseroFeedback`). `hideTrigger` hides the widget's default edge tab so a host app can supply its own trigger UI and open the widget programmatically instead: the vanilla handle already exposed `open()`/`close()`, and the React `UseroFeedbackWidget` component now forwards a ref exposing `open`/`close`/`identify`/`whenReady` for the same purpose. `FeedbackSubmission.pageUrl` / `.pageTitle` are now typed optional (was `string`, is now `string | undefined`) to match the server contract, which already treated them as optional. No wire-format change for anyone not setting the new flags.
+
 ## 1.3.6
 
 Patch. Follow-up to 1.3.5, which kept the typed text but still let the panel disappear. When a host app remounts the widget mid-typing (a React re-render remounting the wrapper), the panel now comes back open on the restored draft instead of collapsing to the closed launcher, which is what "modal just closes sometimes and I lose the text in it" looks like from the outside even when the text is safe in memory. A panel the user closed themselves stays closed, and an empty form still has no draft to restore. No API or wire-format change.

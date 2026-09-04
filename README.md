@@ -76,9 +76,54 @@ The widget auto-detects the OS color scheme via `prefers-color-scheme`. It picks
 | `environment`          | `string`                      | undefined                                     | Tag feedback with an environment           |
 | `baseUrl`              | `string`                      | `'https://usero.io'`                          | Override API host (self-hosted Usero)      |
 | `metadata`             | `Record<string, unknown>`     | undefined                                     | Arbitrary metadata attached to feedback    |
+| `hideTrigger`          | `boolean`                     | `false`                                       | Hide the default edge tab; open the widget yourself |
+| `disablePageContext`   | `boolean`                     | `false`                                       | Don't send `pageUrl` / `pageTitle` / `referrer` |
 | `onSubmit`             | `(data) => void`              | undefined                                     | Fires after a successful submission        |
 | `onError`              | `(err: Error) => void`        | undefined                                     | Fires on init or submission error          |
 | `onOpen` / `onClose`   | `() => void`                  | undefined                                     | Fire when the panel opens/closes           |
+
+## Privacy options
+
+Two opt-in flags, both default `false` with no behaviour change unless you set them.
+
+**`disablePageContext`** stops the widget capturing `pageUrl`, `pageTitle`, and `referrer` on submit. Useful for embeds where `document.title` or the URL can carry sensitive info, e.g. a desktop app shell (Tauri, Electron) whose window title holds a connection name or a local file path. The fields are omitted from the submission entirely, not sent empty.
+
+**`hideTrigger`** hides the widget's default edge tab so you can supply your own trigger UI and open the widget programmatically. The panel, plugins, and identity still mount as normal, only the built-in tab is hidden.
+
+```tsx
+import { useRef } from 'react'
+import { UseroFeedbackWidget, type UseroFeedbackWidgetHandle } from '@usero/sdk/react'
+
+function App() {
+  const widgetRef = useRef<UseroFeedbackWidgetHandle>(null)
+  return (
+    <>
+      <button onClick={() => widgetRef.current?.open()}>Send feedback</button>
+      <UseroFeedbackWidget
+        ref={widgetRef}
+        clientId='YOUR_CLIENT_ID'
+        hideTrigger
+        disablePageContext
+      />
+    </>
+  )
+}
+```
+
+Vanilla and headless integrations use the handle/controller they already get back from `initUseroFeedbackWidget` / `createUseroFeedback`:
+
+```ts
+import { initUseroFeedbackWidget } from '@usero/sdk'
+
+const widget = initUseroFeedbackWidget({
+  clientId: 'YOUR_CLIENT_ID',
+  hideTrigger: true,
+  disablePageContext: true,
+})
+myOwnButton.addEventListener('click', () => widget.open())
+```
+
+The headless controller (`createUseroFeedback` / `useUseroFeedback`) never renders a trigger to begin with, so only `disablePageContext` applies there; pass it in the options object.
 
 ## Session replay
 

@@ -4,7 +4,7 @@
 // bundle tiny (just the wrapper) and means there is one source of truth
 // for widget UX, the vanilla implementation.
 
-import { useEffect, useRef } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
 import {
 	DARK_THEME,
 	DEFAULT_THEME,
@@ -33,8 +33,34 @@ export type {
 } from './types'
 export type { UseroWidgetHandle } from './vanilla'
 
-export function UseroFeedbackWidget(props: FeedbackWidgetProps): null {
+// Imperative surface exposed via ref. A subset of UseroWidgetHandle:
+// `destroy`/`update` stay React-managed (effects below own the widget's
+// lifecycle), so exposing them to consumers would let a ref call race the
+// wrapper's own teardown. Primarily needed with `hideTrigger`, where the
+// host renders its own trigger and calls `ref.current.open()`.
+export interface UseroFeedbackWidgetHandle {
+	open: () => void
+	close: () => void
+	identify: (user: FeedbackWidgetProps['user']) => void
+	whenReady: () => Promise<void>
+}
+
+export const UseroFeedbackWidget = forwardRef<
+	UseroFeedbackWidgetHandle,
+	FeedbackWidgetProps
+>(function UseroFeedbackWidget(props, ref) {
 	const handleRef = useRef<UseroWidgetHandle | null>(null)
+
+	useImperativeHandle(
+		ref,
+		() => ({
+			open: () => handleRef.current?.open(),
+			close: () => handleRef.current?.close(),
+			identify: user => handleRef.current?.identify(user ?? null),
+			whenReady: () => handleRef.current?.whenReady() ?? Promise.resolve(),
+		}),
+		[],
+	)
 
 	// Latest callbacks live in a ref so identity changes (a new arrow each
 	// render) never re-init the widget.
@@ -92,6 +118,10 @@ export function UseroFeedbackWidget(props: FeedbackWidgetProps): null {
 		}
 		if (props.environment !== undefined) updates.environment = props.environment
 		if (props.metadata !== undefined) updates.metadata = props.metadata
+		if (props.hideTrigger !== undefined) updates.hideTrigger = props.hideTrigger
+		if (props.disablePageContext !== undefined) {
+			updates.disablePageContext = props.disablePageContext
+		}
 		handle.update(updates)
 		// theme/metadata compared by serialized identity since they're
 		// objects; primitives use direct dep tracking.
@@ -104,6 +134,8 @@ export function UseroFeedbackWidget(props: FeedbackWidgetProps): null {
 		props.showScreenshotOption,
 		props.environment,
 		metadataJson,
+		props.hideTrigger,
+		props.disablePageContext,
 	])
 
 	// Identity: diff the resolved user by id + email + serialised traits.
@@ -125,4 +157,4 @@ export function UseroFeedbackWidget(props: FeedbackWidgetProps): null {
 	}, [userId, userEmail, userDisplayName, userTraitsJson, userIsNull])
 
 	return null
-}
+})

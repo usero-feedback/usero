@@ -24,8 +24,12 @@ export interface FeedbackSubmission {
 	rating?: FeedbackRating
 	comment?: string
 	userEmail?: string
-	pageUrl: string
-	pageTitle: string
+	// Omitted entirely when the caller opts into `disablePageContext`. The
+	// server schema already treats these as optional (falls back to the
+	// Referer header for pageUrl), so omitting is a wire-compatible no-op
+	// for everyone who doesn't set the flag.
+	pageUrl?: string
+	pageTitle?: string
 	referrer?: string
 	environment?: string
 	screenshots?: ScreenshotData[]
@@ -93,6 +97,17 @@ export interface FeedbackWidgetProps {
 	environment?: string
 	baseUrl?: string
 	metadata?: Record<string, unknown>
+	// Privacy: when true, do not render the default edge trigger tab. The
+	// widget still mounts (panel, plugins, identity) so the host app can
+	// open it programmatically via the returned handle's `open()` (vanilla)
+	// or a ref (React). Default false, zero behaviour change.
+	hideTrigger?: boolean
+	// Privacy: when true, submissions omit pageUrl/pageTitle/referrer
+	// entirely instead of capturing them from window.location/document.
+	// Useful for embeds where document.title or the URL can carry
+	// sensitive info (e.g. a desktop app shell where the title holds a
+	// connection name or file path). Default false, zero behaviour change.
+	disablePageContext?: boolean
 	plugins?: ReadonlyArray<import('./plugin').UseroPlugin>
 	// Declarative identity. React: pass the current user (or null on
 	// logout) and the SDK auto-fires identify when the resolved id

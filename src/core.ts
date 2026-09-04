@@ -333,20 +333,30 @@ export interface BuildSubmissionOptions {
 	environment?: string
 	// Instance-wide metadata attached to every submission.
 	metadata?: Record<string, unknown>
+	// Privacy: when true, skip capturing pageUrl/pageTitle/referrer so
+	// none of the three are sent on the wire. See FeedbackWidgetProps /
+	// UseroFeedbackOptions for the full rationale.
+	disablePageContext?: boolean
 	payload: SubmitFeedbackPayload
 }
 
 export function buildFeedbackSubmission(
 	options: BuildSubmissionOptions,
 ): FeedbackSubmission {
-	const { clientId, environment, metadata, payload } = options
-	const pageUrl = typeof window !== 'undefined' ? window.location.href : ''
-	const pageTitle =
-		typeof document !== 'undefined'
+	const { clientId, environment, metadata, disablePageContext, payload } = options
+	const pageUrl = disablePageContext
+		? undefined
+		: typeof window !== 'undefined'
+			? window.location.href
+			: ''
+	const pageTitle = disablePageContext
+		? undefined
+		: typeof document !== 'undefined'
 			? document.title || 'Untitled Page'
 			: 'Untitled Page'
-	const referrer =
-		typeof document !== 'undefined' && document.referrer
+	const referrer = disablePageContext
+		? undefined
+		: typeof document !== 'undefined' && document.referrer
 			? document.referrer
 			: undefined
 

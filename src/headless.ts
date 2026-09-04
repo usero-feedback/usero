@@ -52,6 +52,12 @@ export interface UseroFeedbackOptions {
 	// Instance-wide metadata attached to every submission. Per-submission
 	// metadata passed to submit() is deep-merged over it (one level).
 	metadata?: Record<string, unknown>
+	// Privacy: when true, submit() omits pageUrl/pageTitle/referrer
+	// entirely instead of capturing them from window.location/document.
+	// Useful when document.title or the URL can carry sensitive info (e.g.
+	// a desktop app shell where the title holds a connection name or file
+	// path). Default false, zero behaviour change.
+	disablePageContext?: boolean
 	// Plugins run exactly as they do under the widget: onInit at creation,
 	// onFeedbackSubmit on every submit (this is what lets sessionReplay()
 	// auto-attach sessionReplayId/replayOffsetMs to your submissions), and
@@ -155,6 +161,7 @@ export function createUseroFeedback(
 				clientId,
 				environment: options.environment,
 				metadata: options.metadata,
+				disablePageContext: options.disablePageContext,
 				payload,
 			})
 			const validation = validateFeedbackSubmission(submission)

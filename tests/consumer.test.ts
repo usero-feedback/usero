@@ -11,7 +11,10 @@ import type {
 } from '@usero/sdk'
 import { sessionReplay } from '@usero/sdk/plugins/session-replay'
 import { UseroFeedbackWidget } from '@usero/sdk/react'
-import type { FeedbackWidgetProps as ReactProps } from '@usero/sdk/react'
+import type {
+	FeedbackWidgetProps as ReactProps,
+	UseroFeedbackWidgetHandle,
+} from '@usero/sdk/react'
 import { sessionReplay as sessionReplayCanonical } from '@usero/sdk/replay'
 import type { SessionReplayInstance } from '@usero/sdk/replay'
 import { useSessionReplay } from '@usero/sdk/replay/react'
@@ -38,6 +41,14 @@ void ready
 const _component: typeof UseroFeedbackWidget = UseroFeedbackWidget
 void _component
 void propsB
+
+// Privacy options type-check on both entry points, and the React ref
+// handle exposes open()/close() for the hideTrigger use case.
+declare const propsWithPrivacy: FeedbackWidgetProps
+void ({ ...propsWithPrivacy, hideTrigger: true, disablePageContext: true } satisfies FeedbackWidgetProps)
+declare const widgetHandle: UseroFeedbackWidgetHandle
+widgetHandle.open()
+widgetHandle.close()
 
 // Plugin contract resolves through the public export and the session-replay
 // subpath returns a UseroPlugin instance.
