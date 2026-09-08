@@ -89,6 +89,13 @@ export interface RecorderStore {
 	// real audio returns. silenceMonitor holds the AnalyserNode teardown.
 	micSilent: boolean
 	silenceMonitor: { stop(): void } | null
+	// Teardown for the mic device watcher (devicechange + track ended/mute
+	// re-acquire). Replaced on every (re)acquire, cleared by stopRecording and
+	// onDestroy. Null when no watcher is attached.
+	micWatcherCleanup: (() => void) | null
+	// Wall-clock ms of the last automatic mic re-acquire attempt. Debounces
+	// flap storms (see MIC_REACQUIRE_DEBOUNCE_MS). Zero means never.
+	lastMicReacquireAt: number
 	muteToastShown: boolean
 	muteToastTimers: number[]
 	// Timers for the "Recording resumed" confirmation pill (shown once after a
@@ -122,6 +129,11 @@ export interface RecorderStore {
 	// dropped pausedAt, defeating the RESUME_MAX_IDLE_MS idle gate. Reset to false
 	// on a successful resume (the recorder is live again).
 	paused: boolean
+	// True while the page is unloading mid-test (pauseFlow ran from pagehide /
+	// hidden). Routes the trailing chunk through sendBeacon first, with the
+	// fetch fallback forced onto keepalive. Fresh documents start false; only
+	// pauseFlow ever sets it, so a normal Finish never takes the beacon path.
+	unloading: boolean
 	// True when this store was rehydrated from persisted localStorage state
 	// (a resume across a hard navigation) rather than a fresh start. Lets the
 	// init path skip session creation/adoption and continue the chunk index.
@@ -146,12 +158,13 @@ export const DEFAULT_OPTIONS: Required<Omit<UserTestOptions, 'testerName' | 'api
 	apiUrl: string
 } = {
 	queryParam: 'usero_test',
-	// 10s (not 30) so at most ~10s of audio is at risk if the tab is torn
-	// down before a flush, and so a session shorter than the old 30s window
-	// still emits at least one chunk (previously its single buffered chunk was
-	// never flushed and its audio was lost). Tradeoff: ~3x the R2 writes /
-	// upload requests per session; 10s is an acceptable balance, don't go lower.
-	chunkSeconds: 10,
+	// 5s so at most ~5s of audio is at risk if the tab is torn down before a
+	// flush, and so the trailing chunk racing unload stays small enough for
+	// the sendBeacon handoff (browsers cap beacon bodies around 64KB; a full
+	// 10s Opus chunk straddled it and fell back to a fetch the unload then
+	// cancelled). Tradeoff: ~2x the R2 writes of the old 10s window; 5s is an
+	// acceptable balance, don't go lower.
+	chunkSeconds: 5,
 	apiUrl: DEFAULT_API_URL,
 	testerName: '',
 	hideIndicator: false,
@@ -334,8 +347,13 @@ export const SILENCE_FLOOR_DB = -100
 // that a dead device is flagged almost immediately.
 export const SILENCE_SUSTAINED_MS = 1800
 
-// How often the monitor samples the analyser.
-export const SILENCE_POLL_MS = 250
+	// How often the monitor samples the analyser.
+	export const SILENCE_POLL_MS = 250
+
+	// Minimum ms between automatic mic re-acquires. A Bluetooth profile flap
+	// fires devicechange + track ended + mute together, so without this the
+	// watcher would stack several teardown+re-acquire cycles at once.
+	export const MIC_REACQUIRE_DEBOUNCE_MS = 3000
 
 // Inline SVGs kept tiny. currentColor so they inherit the chip text color.
 export const MIC_ICON_SVG = `<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" width="13" height="13"><path d="M8 1.5a2 2 0 0 0-2 2v4a2 2 0 1 0 4 0v-4a2 2 0 0 0-2-2Z" fill="currentColor"/><path d="M4 7.5a4 4 0 0 0 8 0M8 11.5v3M5.5 14.5h5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`

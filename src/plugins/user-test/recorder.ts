@@ -10,6 +10,7 @@ import {
 	type ChunkUploadOutcome,
 	IDB_NAME,
 	IDB_STORE,
+	MIC_REACQUIRE_DEBOUNCE_MS,
 	type PendingChunk,
 	type RecorderStore,
 	SILENCE_FLOOR_DB,
@@ -130,6 +131,26 @@ async function idbListChunks(sessionId: string): Promise<PendingChunk[]> {
 //     'retry' to the 'failed' outcome (stash for a later offline flush).
 export type ChunkResponseClass = 'ok' | 'closed' | 'retry' | 'fatal'
 
+export function chunkUrl(apiUrl: string, sessionId: string, index: number): string {
+	return `${apiUrl.replace(/\/$/, '')}/api/user-test-sessions/${encodeURIComponent(sessionId)}/chunk?index=${index}`
+}
+
+export function isBeaconAvailable(): boolean {
+	return typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function'
+}
+
+// Fire-and-forget handoff for the trailing chunk racing page unload. sendBeacon
+// survives teardown where fetch (even keepalive) is cancelled, but it only
+// accepts POST (the chunk route allows PUT and POST) and the browser may
+// refuse bodies over its cap, so false means "fall back to fetch".
+export function tryBeaconChunk(apiUrl: string, sessionId: string, index: number, blob: Blob): boolean {
+	if (!isBeaconAvailable()) return false
+	try {
+		return navigator.sendBeacon(chunkUrl(apiUrl, sessionId, index), blob)
+	} catch {
+		return false
+	}
+}
 export function classifyChunkResponse(status: number, body: unknown): ChunkResponseClass {
 	if (status >= 200 && status < 300) return 'ok'
 	// Definitive session-closed signal: 409 + closeResume: true. Read the flag
@@ -152,8 +173,9 @@ async function uploadChunkWithRetry(
 	blob: Blob,
 	logger: PluginContext['logger'],
 	maxAttempts = 5,
+	forceKeepalive = false,
 ): Promise<ChunkUploadOutcome> {
-	const url = `${apiUrl.replace(/\/$/, '')}/api/user-test-sessions/${encodeURIComponent(sessionId)}/chunk?index=${index}`
+	const url = chunkUrl(apiUrl, sessionId, index)
 	let attempt = 0
 	while (attempt < maxAttempts) {
 		try {
@@ -161,7 +183,12 @@ async function uploadChunkWithRetry(
 				method: 'PUT',
 				body: blob,
 				headers: { 'Content-Type': blob.type || 'audio/webm' },
-				keepalive: blob.size <= 60 * 1024, // browsers cap keepalive bodies
+				// The trailing chunk racing unload always opts into keepalive:
+				// a full-timeslice Opus chunk straddles the 60KB gate, and a
+				// cancelled upload loses audio while a rejected oversize one
+				// just falls back to the offline stash. Normal timeslice
+				// uploads keep the gate (the page is alive, no need).
+				keepalive: forceKeepalive ? true : blob.size <= 60 * 1024,
 			})
 			if (res.ok) return 'ok'
 			// Read the body to distinguish a session-closed signal (409 +
@@ -227,17 +254,24 @@ function enqueueChunk(store: RecorderStore, ctx: PluginContext, blob: Blob): voi
 	// would just spin against a closed session.
 	if (store.cancelled || store.sessionClosed || !store.sessionId || blob.size === 0) return
 	const index = store.chunkIndex
-	store.chunkIndex += 1
-	// Advance the persisted resume pointer so a hard navigation mid-recording
-	// resumes from the next index, never re-using one already shipped. If the
-	// page is pausing (store.paused, set before stopRecording) or finishing, the
-	// trailing chunk stopRecording flushes must persist as 'paused' so pausedAt is
-	// preserved and the RESUME_MAX_IDLE_MS idle gate engages; an 'active' write
-	// here would clobber pausedAt.
-	persistActiveSession(store, store.paused || store.finishFlowRan ? 'paused' : 'active')
-	store.pendingUploads += 1
 	const sessionId = store.sessionId
 	const apiUrl = store.options.apiUrl
+	// The trailing chunk racing page unload (pauseFlow set unloading before
+	// stopRecording flushed it) goes via sendBeacon first: fetch, even with
+	// keepalive, is cancelled on teardown while a queued beacon survives. A
+	// queued beacon needs no upload-queue tracking; the resume pointer below
+	// still advances so the next leg continues the index. When the beacon is
+	// refused (no support, over the body cap), fall through to the fetch queue
+	// with keepalive forced on.
+	if (store.unloading && tryBeaconChunk(apiUrl, sessionId, index, blob)) {
+		ctx.logger.info(`chunk ${index} handed to sendBeacon on unload`)
+		store.chunkIndex += 1
+		persistActiveSession(store, 'paused')
+		return
+	}
+	const unloading = store.unloading
+	store.chunkIndex += 1
+	store.pendingUploads += 1
 
 	store.uploadQueue = store.uploadQueue.then(async () => {
 		// A prior chunk in the queue may have already seen the close signal; skip
@@ -246,7 +280,7 @@ function enqueueChunk(store: RecorderStore, ctx: PluginContext, blob: Blob): voi
 			store.pendingUploads -= 1
 			return
 		}
-		const outcome = await uploadChunkWithRetry(apiUrl, sessionId, index, blob, ctx.logger)
+		const outcome = await uploadChunkWithRetry(apiUrl, sessionId, index, blob, ctx.logger, 5, unloading)
 		if (outcome === 'closed') {
 			// Definitive server "session closed". Stop recording, clear resume
 			// state, show the ended screen. Do NOT stash: the chunk can't land.
@@ -264,6 +298,12 @@ function enqueueChunk(store: RecorderStore, ctx: PluginContext, blob: Blob): voi
 		}
 		store.pendingUploads -= 1
 	})
+	// Advance the persisted resume pointer only AFTER the chunk is handed to a
+	// transport (beacon above, or the fetch queue here), so a torn-down page
+	// can never advance past a chunk that was never queued. A 'paused' write
+	// keeps pausedAt and the RESUME_MAX_IDLE_MS idle gate; an 'active' write
+	// here would clobber pausedAt.
+	persistActiveSession(store, store.paused || store.finishFlowRan ? 'paused' : 'active')
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +426,82 @@ function startSilenceMonitor(stream: MediaStream, onChange: (silent: boolean) =>
 	}
 }
 
+// Pure re-acquire gate: true once the debounce window since the last attempt
+// has elapsed, so a flap storm (devicechange + ended + mute firing together)
+// triggers exactly one teardown+re-acquire. Unit-tested directly.
+export function shouldReacquireMic(nowMs: number, lastAttemptMs: number, debounceMs = MIC_REACQUIRE_DEBOUNCE_MS): boolean {
+	return nowMs - lastAttemptMs >= debounceMs
+}
+
+// Watch the live mic for mid-session death: a Bluetooth profile flap (or an
+// unplugged headset) ends or mutes the track while getUserMedia still looks
+// healthy, and MediaRecorder then ships silence that looks like audio. On
+// track end/mute or a device change, tear down and re-run the normal acquire
+// path (which flushes audio recorded up to the flap as a trailing chunk).
+// Returns a teardown; the caller stores it on the store and runs it from
+// stopRecording. The silent-mic warn-only guard is untouched: this only fires
+// on device-level signals, never on quiet audio.
+function watchMicDevice(store: RecorderStore, ctx: PluginContext, stream: MediaStream): () => void {
+	const reacquire = (): void => {
+		if (store.cancelled || store.sessionClosed) return
+		if (store.finishFlowRan || store.indicatorState === 'finishing' || store.indicatorState === 'done') return
+		if (store.paused || store.unloading) return
+		if (store.muted) return
+		if (!store.sessionId || !store.recorder || store.recorder.state === 'inactive') return
+		const now = Date.now()
+		if (!shouldReacquireMic(now, store.lastMicReacquireAt)) return
+		store.lastMicReacquireAt = now
+		ctx.logger.warn('mic track ended or device changed mid-session, re-acquiring')
+		stopRecording(store)
+		void startRecording(store, ctx)
+	};
+	const onTrackGone = (): void => {
+		reacquire()
+	};
+	const tracks = stream.getAudioTracks()
+	for (const track of tracks) {
+		// Intentional mute sets enabled=false, which does not fire mute; the
+		// store.muted guard above covers it regardless.
+		track.addEventListener('ended', onTrackGone)
+		track.addEventListener('mute', onTrackGone)
+	}
+	let removeDeviceListener: (() => void) | null = null
+	try {
+		if (typeof navigator !== 'undefined' && navigator.mediaDevices?.addEventListener) {
+			const onDeviceChange = (): void => {
+				reacquire()
+			};
+			navigator.mediaDevices.addEventListener('devicechange', onDeviceChange)
+			removeDeviceListener = (): void => {
+				try {
+					if (typeof navigator !== 'undefined') {
+						navigator.mediaDevices?.removeEventListener('devicechange', onDeviceChange)
+					}
+				} catch {
+					// teardown races are harmless
+				}
+			}
+		}
+	} catch {
+		// mediaDevices absent: track handlers above still cover unplug flaps
+	}
+	return (): void => {
+		for (const track of tracks) {
+			try {
+				track.removeEventListener('ended', onTrackGone)
+			} catch {
+				// already torn down
+			}
+			try {
+				track.removeEventListener('mute', onTrackGone)
+			} catch {
+				// already torn down
+			}
+		}
+		removeDeviceListener?.()
+	}
+}
+
 export async function startRecording(store: RecorderStore, ctx: PluginContext): Promise<void> {
 	// Re-entrant: the failed chip re-invokes this to retry. Reset to the
 	// pending state so the chip shows "connecting" again during the attempt.
@@ -396,6 +512,10 @@ export async function startRecording(store: RecorderStore, ctx: PluginContext): 
 	if (store.silenceMonitor) {
 		store.silenceMonitor.stop()
 		store.silenceMonitor = null
+	}
+	if (store.micWatcherCleanup) {
+		store.micWatcherCleanup()
+		store.micWatcherCleanup = null
 	}
 	store.micSilent = false
 	renderIndicatorState(store)
@@ -476,6 +596,10 @@ export async function startRecording(store: RecorderStore, ctx: PluginContext): 
 		ctx.logger,
 	)
 	store.silenceMonitor = monitor
+	// Watch for mid-session mic death (Bluetooth profile flap, unplugged
+	// headset): re-acquire on device-level signals. Warn-only silence guard
+	// above is untouched. Torn down by stopRecording.
+	store.micWatcherCleanup = watchMicDevice(store, ctx, stream)
 }
 
 export function toggleMute(store: RecorderStore): boolean {
@@ -516,6 +640,10 @@ export function stopRecording(store: RecorderStore): void {
 	if (store.silenceMonitor) {
 		store.silenceMonitor.stop()
 		store.silenceMonitor = null
+	}
+	if (store.micWatcherCleanup) {
+		store.micWatcherCleanup()
+		store.micWatcherCleanup = null
 	}
 	store.micSilent = false
 	const recorder = store.recorder

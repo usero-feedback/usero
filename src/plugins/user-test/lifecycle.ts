@@ -33,6 +33,10 @@ export function pauseFlow(store: RecorderStore): void {
 	// enqueueChunk -> persistActiveSession) writes 'paused' and keeps pausedAt,
 	// rather than overwriting the entry with 'active' and dropping the idle clock.
 	store.paused = true
+	// Flag unloading alongside it so enqueueChunk routes that same trailing
+	// chunk through sendBeacon (fetch is cancelled on teardown) and forces the
+	// fetch fallback onto keepalive.
+	store.unloading = true
 	flushMuteIfActive(store)
 	stopRecording(store)
 	// Mark the persisted state paused at the current chunk index. The queued
