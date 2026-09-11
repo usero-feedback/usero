@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.2
+
+Patch. Fixes the replay offset recorded for human user tests. replayOffsetMs was captured at plugin init, before the mic prompt, so audio and replay drifted by however long the participant took to allow the microphone, and a mid-test navigation re-anchored it to the post-nav replay leg. The recorder now pins audioStartedAt at the first successful MediaRecorder start and replayStartedAt from the first replay leg, persists both across a resume, and computes the offset at finalise. No API or wire-format change.
+
 ## 1.4.1
 
 Patch. Fixes three stacked audio-loss bugs in human user tests that together reduced a 94s session to 39s of transcribed audio. The trailing chunk racing page unload now goes through navigator.sendBeacon with a keepalive-fetch fallback instead of a size-gated fetch the unload cancelled, and the default timeslice drops from 10s to 5s so the trailing chunk fits the beacon body cap. The mic watcher re-acquires the stream through the existing teardown plus startRecording path, debounced 3s against flap storms, when the track ends or mutes or the device list changes, so a Bluetooth profile flap no longer ships healthy-looking silence. Server side (feedback repo, same release train), the concat step splits chunks into recorder legs at each EBML header and re-encodes per leg before joining, so post-resume legs no longer collapse onto timestamp zero and drop the pre-nav leg. No API or wire-format change.

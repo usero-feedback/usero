@@ -570,6 +570,15 @@ export async function startRecording(store: RecorderStore, ctx: PluginContext): 
 	})
 	// `timeslice` makes the recorder emit a self-contained chunk every N ms.
 	recorder.start(store.options.chunkSeconds * 1000)
+	// Audio t=0 is the first successful recorder start, not plugin init (the mic
+	// prompt sits in between). Pinned once; a re-acquire keeps the original.
+	if (store.audioStartedAt === null) {
+		store.audioStartedAt = Date.now()
+		if (store.replayStartedAt === null && store.freshStart && ctx.getReplayStartMs) {
+			store.replayStartedAt = ctx.getReplayStartMs()
+		}
+		persistActiveSession(store, 'active')
+	}
 	// On a successful (re)acquire, restore the live recording indicator. A
 	// prior failed attempt left indicatorState at 'no-audio' (steady amber
 	// dot); now that audio is live the dot should pulse red again.

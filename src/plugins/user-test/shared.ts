@@ -145,12 +145,13 @@ export interface RecorderStore {
 	// after resume. Null when replay is not active / the host predates the core
 	// accessor.
 	sdkSessionId: string | null
-	// Offset (ms) into the session-replay recording at the moment THIS
-	// user-test session started. Captured once at start (not at finalise)
-	// so it pins the test timeline to the recording timeline. Null when no
-	// replay is active (plugin not loaded, sampled out, or host predates
-	// the core accessor); finalise then omits replayOffsetMs.
-	replayOffsetAtStartMs: number | null
+	// Epoch ms of the FIRST MediaRecorder start (audio t=0) and of the first
+	// replay leg. Both persist across a resume; finalise derives replayOffsetMs
+	// from them. Null until known.
+	audioStartedAt: number | null
+	replayStartedAt: number | null
+	// False on a resumed leg: the core's replay epoch is then the post-nav leg's.
+	freshStart: boolean
 }
 
 export const DEFAULT_OPTIONS: Required<Omit<UserTestOptions, 'testerName' | 'apiUrl'>> & {
@@ -218,6 +219,16 @@ export interface ActiveSessionState {
 	// returning to the origin hours later for an UNRELATED reason can't silently
 	// re-adopt the test and re-acquire the mic. Absent until the first pause.
 	pausedAt?: number
+	// Epochs behind replayOffsetMs (see RecorderStore). Absent on older entries.
+	audioStartedAt?: number
+	replayStartedAt?: number
+}
+
+// Audio t=0 on the replay timeline. Clamped at 0: the server rejects negatives
+// and the mic prompt means audio never really starts before the replay.
+export function computeReplayOffsetMs(audioStartedAt: number | null, replayStartedAt: number | null): number | null {
+	if (audioStartedAt === null || replayStartedAt === null) return null
+	return Math.max(0, Math.round(audioStartedAt - replayStartedAt))
 }
 
 export interface PendingChunk {

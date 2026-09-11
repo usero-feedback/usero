@@ -31,6 +31,8 @@ export function parseActiveSession(raw: unknown): ActiveSessionState | null {
 		status?: unknown
 		sdkSessionId?: unknown
 		pausedAt?: unknown
+		audioStartedAt?: unknown
+		replayStartedAt?: unknown
 	}
 	if (typeof s.slug !== 'string' || !s.slug) return null
 	if (typeof s.sessionId !== 'string' || !s.sessionId) return null
@@ -51,6 +53,12 @@ export function parseActiveSession(raw: unknown): ActiveSessionState | null {
 	}
 	if (typeof s.pausedAt === 'number' && Number.isFinite(s.pausedAt)) {
 		result.pausedAt = s.pausedAt
+	}
+	if (typeof s.audioStartedAt === 'number' && Number.isFinite(s.audioStartedAt)) {
+		result.audioStartedAt = s.audioStartedAt
+	}
+	if (typeof s.replayStartedAt === 'number' && Number.isFinite(s.replayStartedAt)) {
+		result.replayStartedAt = s.replayStartedAt
 	}
 	return result
 }
@@ -115,6 +123,8 @@ export function persistActiveSession(store: RecorderStore, status: 'active' | 'p
 		status,
 	}
 	if (store.sdkSessionId) state.sdkSessionId = store.sdkSessionId
+	if (store.audioStartedAt !== null) state.audioStartedAt = store.audioStartedAt
+	if (store.replayStartedAt !== null) state.replayStartedAt = store.replayStartedAt
 	// Stamp pausedAt when the page hides mid-test so resume eligibility can be
 	// gated on idle time (see RESUME_MAX_IDLE_MS in readActiveSession). An
 	// 'active' write (recording start / chunk index advance) intentionally omits

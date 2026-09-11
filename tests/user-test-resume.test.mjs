@@ -327,3 +327,29 @@ test('Fix 5: adoptSession maps a fetch reject (offline) -> error (state RETAINED
 		globalThis.fetch = orig
 	}
 })
+
+test('parseActiveSession: round-trips the audio/replay start epochs behind replayOffsetMs', () => {
+	const state = {
+		slug: 's',
+		sessionId: 'id',
+		nextChunkIndex: 1,
+		startedAt: 1_700_000_000_000,
+		status: 'active',
+		audioStartedAt: 1_700_000_004_200,
+		replayStartedAt: 1_700_000_002_000,
+	}
+	assert.deepEqual(parseActiveSession(state), state)
+	// Older entries (or a session where replay never started) just omit them.
+	const bare = parseActiveSession({ slug: 's', sessionId: 'id', nextChunkIndex: 0, startedAt: 1, audioStartedAt: 'x' })
+	assert.equal(bare.audioStartedAt, undefined)
+	assert.equal(bare.replayStartedAt, undefined)
+})
+
+test('computeReplayOffsetMs: audio t=0 relative to the first replay leg, clamped at 0', () => {
+	const { computeReplayOffsetMs } = __test__
+	// Mic prompt answered 2.2s after the replay started: audio 0:00 is replay 0:02.2.
+	assert.equal(computeReplayOffsetMs(1_700_000_004_200, 1_700_000_002_000), 2200)
+	assert.equal(computeReplayOffsetMs(1_700_000_001_000, 1_700_000_002_000), 0)
+	assert.equal(computeReplayOffsetMs(null, 1_700_000_002_000), null)
+	assert.equal(computeReplayOffsetMs(1_700_000_004_200, null), null)
+})

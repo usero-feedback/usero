@@ -8,7 +8,7 @@
 import type { PluginContext } from '../../plugin'
 import { flushMuteIfActive, flushPendingFromIdb, startRecording, stopRecording } from './recorder'
 import { clearActiveSession, finaliseSession, persistActiveSession, postPayout } from './session'
-import type { PaymentSummary, RecorderStore } from './shared'
+import { computeReplayOffsetMs, type PaymentSummary, type RecorderStore } from './shared'
 import { renderIndicatorState, showThanksScreen } from './ui'
 
 // Pause the recording for a hard navigation (pagehide / tab hidden) WITHOUT
@@ -64,18 +64,17 @@ export async function finishFlow(store: RecorderStore, ctx: PluginContext, opts:
 	await flushPendingFromIdb(store, ctx)
 
 	const durationSeconds = (Date.now() - store.startedAt) / 1000
-	// Replay linkage, computed once and sent on every finalise call for this
-	// session. sdkSessionId is the core-owned per-tab id (the primary key the
-	// server uses to resolve the SessionReplay); replayOffsetMs is the offset
-	// captured at session start, only set when replay was active. Both degrade
-	// gracefully to absent. Sending it on the second (end-note) finalise too
-	// is harmless: the server stores idempotently.
+	// Replay linkage, sent on every finalise call (the server stores
+	// idempotently). replayOffsetMs = audio t=0 relative to the first replay leg.
 	const replayLinkage: { sdkSessionId?: string; replayOffsetMs?: number } = {}
 	const linkageSdkSessionId = ctx.getSdkSessionId ? ctx.getSdkSessionId() : undefined
 	if (linkageSdkSessionId) replayLinkage.sdkSessionId = linkageSdkSessionId
-	if (store.replayOffsetAtStartMs !== null) {
-		replayLinkage.replayOffsetMs = store.replayOffsetAtStartMs
+	// Last chance to pin the replay epoch (replay plugin published after the mic started).
+	if (store.replayStartedAt === null && store.freshStart && ctx.getReplayStartMs) {
+		store.replayStartedAt = ctx.getReplayStartMs()
 	}
+	const replayOffsetMs = computeReplayOffsetMs(store.audioStartedAt, store.replayStartedAt)
+	if (replayOffsetMs !== null) replayLinkage.replayOffsetMs = replayOffsetMs
 	// Payment summary from the first finalise response drives the finished screen
 	// (complete vs ended-early, reward headline, one-tap payout default).
 	let payment: PaymentSummary | null = null

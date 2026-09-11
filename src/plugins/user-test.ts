@@ -78,6 +78,7 @@ import {
 import {
 	ACTIVE_SESSION_MAX_AGE_MS,
 	ACTIVE_SESSION_STORAGE_KEY,
+	computeReplayOffsetMs,
 	DEFAULT_OPTIONS,
 	type InFlightNote,
 	MIC_REACQUIRE_DEBOUNCE_MS,
@@ -208,7 +209,11 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 			unloading: false,
 			resumed: isResume,
 				sdkSessionId: null,
-				replayOffsetAtStartMs: null,
+				// On resume, keep the original epochs so the offset stays anchored to
+				// the first audio + replay legs, not the post-nav ones.
+				audioStartedAt: resumable?.audioStartedAt ?? null,
+				replayStartedAt: resumable?.replayStartedAt ?? null,
+				freshStart: !isResume,
 			}
 			ctx.setStore(store)
 
@@ -433,18 +438,12 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				// navigation in the first few seconds of recording still resumes AND
 				// keeps the replay link.
 				persistActiveSession(store, 'active')
-				// Capture the replay offset HERE at session start (not at
-				// finalise) so it reflects when the test began relative to the
-				// recording. The replay plugin publishes its start epoch into
-				// the core; we read it via the context. If replay is not active
-				// (plugin not loaded, sampled out, or an older host without the
-				// accessor) we leave it null and the finalise body omits
-				// replayOffsetMs. Anchored to store.startedAt (test start),
-				// clamped >= 0 in case the test starts a hair before the replay
-				// epoch is published.
-				const replayStartMs = ctx.getReplayStartMs ? ctx.getReplayStartMs() : null
-				store.replayOffsetAtStartMs =
-					replayStartMs === null ? null : Math.max(0, store.startedAt - replayStartMs)
+				// First chance to pin the replay epoch (a fresh start only: on resume
+				// the core holds the post-nav leg's epoch, which is the wrong anchor).
+				// The replay plugin may publish later; the recorder start retries.
+				if (store.freshStart && store.replayStartedAt === null && ctx.getReplayStartMs) {
+					store.replayStartedAt = ctx.getReplayStartMs()
+				}
 				store.tasks = created.tasks
 				if (store.tasks.length > 0 && store.indicatorRoot && !merged.hideIndicator) {
 					const bar = store.indicatorRoot.querySelector('.bar')
@@ -531,4 +530,5 @@ export const __test__ = {
 	ACTIVE_SESSION_MAX_AGE_MS,
 	RESUME_MAX_IDLE_MS,
 	ACTIVE_SESSION_STORAGE_KEY,
+	computeReplayOffsetMs,
 }
