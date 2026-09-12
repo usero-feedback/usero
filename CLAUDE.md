@@ -50,7 +50,7 @@ grep -rl --include=package.json -E '"@usero/sdk"' . 2>/dev/null \
   | grep -v -E 'node_modules|\.claude/worktrees|/usero/'
 ```
 
-Every path it prints has `@usero/sdk` literally in its `package.json` (the grep filters on that exact string), so every one is a real consumer to bump. They are NOT legacy `react-feedback-collector` repos, the grep cannot match those. The fuller policy (why bump everything, don't pause to ask about scope or major bumps) lives in `/Users/willy/projects/feedback/CLAUDE.md` under "Releasing a new widget version, bump consumers". Follow that.
+Every path it prints has `@usero/sdk` literally in its `package.json` (the grep filters on that exact string), so every one is a real consumer to bump. They are NOT legacy `react-feedback-collector` repos, the grep cannot match those. The fuller policy (why bump everything, don't pause to ask about scope or major bumps) lives in `/Users/willy/projects/feedback/docs/WIDGET-RELEASE.md`. Follow that.
 
 For each consumer the grep returns:
 
@@ -62,7 +62,7 @@ For each consumer the grep returns:
 6. Run that repo's `npm run typecheck` if it has one. Some repos carry pre-existing typecheck errors unrelated to the SDK (verify against the baseline dep files if unsure); only block the commit on a NEW failure the bump introduced.
 7. Stage ONLY `package.json` + the matching lockfile by explicit path. Commit `Bump @usero/sdk to <version>`. Push to `main`.
 
-The legacy `react-feedback-collector` package is consumed by a separate list of repos (see `/Users/willy/projects/feedback/CLAUDE.md` for the legacy consumer list). Those do NOT get bumped on a `@usero/sdk` release, and the grep above never matches them anyway.
+The legacy `react-feedback-collector` package is consumed by a separate set of repos. Those do NOT get bumped on a `@usero/sdk` release, and the grep above never matches them anyway.
 
 # Code
 
