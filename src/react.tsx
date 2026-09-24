@@ -28,6 +28,7 @@ export type {
 	UseroUser,
 	UseroUserTraitValue,
 	UseroUserTraits,
+	WidgetLauncherType,
 	WidgetPosition,
 	WidgetTheme,
 } from './types'
@@ -119,6 +120,10 @@ export const UseroFeedbackWidget = forwardRef<
 		if (props.environment !== undefined) updates.environment = props.environment
 		if (props.metadata !== undefined) updates.metadata = props.metadata
 		if (props.hideTrigger !== undefined) updates.hideTrigger = props.hideTrigger
+		if (props.launcherType !== undefined) updates.launcherType = props.launcherType
+		if (props.launcherLabel !== undefined) {
+			updates.launcherLabel = props.launcherLabel
+		}
 		if (props.disablePageContext !== undefined) {
 			updates.disablePageContext = props.disablePageContext
 		}
@@ -135,6 +140,8 @@ export const UseroFeedbackWidget = forwardRef<
 		props.environment,
 		metadataJson,
 		props.hideTrigger,
+		props.launcherType,
+		props.launcherLabel,
 		props.disablePageContext,
 	])
 

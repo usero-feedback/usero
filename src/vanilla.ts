@@ -32,6 +32,7 @@ import {
 	mergeTheme,
 	RATING_LABELS,
 	type ScreenshotData,
+	type WidgetLauncherType,
 	type WidgetPosition,
 	type WidgetTheme,
 } from './types'
@@ -76,6 +77,7 @@ export type {
 	FeedbackSubmission,
 	FeedbackWidgetProps,
 	ScreenshotData,
+	WidgetLauncherType,
 	WidgetPosition,
 	WidgetTheme,
 } from './types'
@@ -210,6 +212,8 @@ export function initUseroFeedbackWidget(
 	let showScreenshotOption: boolean = props.showScreenshotOption ?? true
 	let environment: string | undefined = props.environment
 	let metadata: Record<string, unknown> | undefined = props.metadata
+	let launcherTypeProp: WidgetLauncherType | undefined = props.launcherType
+	let launcherLabel: string | undefined = props.launcherLabel
 	let hideTrigger: boolean = props.hideTrigger ?? false
 	let disablePageContext: boolean = props.disablePageContext ?? false
 	let onSubmit: FeedbackWidgetProps['onSubmit'] = props.onSubmit
@@ -570,22 +574,33 @@ export function initUseroFeedbackWidget(
 		}
 	}
 
+	// launcherType wins over the deprecated hideTrigger when both are set.
+	function resolveLauncherType(): WidgetLauncherType {
+		return launcherTypeProp ?? (hideTrigger ? 'none' : 'tab')
+	}
+
 	// Static button content + styles (only style.background changes once)
 	function renderButton(): void {
-		buttonEl.className = `fb-btn fb-btn--${position} ${isOpen ? 'fb-btn--open' : ''}`
-		buttonEl.setAttribute('aria-label', 'Open feedback')
+		const launcher = resolveLauncherType()
+		const isPill = launcher === 'button'
+		const hidden = launcher === 'none'
+		const label = launcherLabel ?? title
+		buttonEl.className = `fb-btn fb-btn--${position} ${isPill ? 'fb-btn--pill' : ''} ${isOpen ? 'fb-btn--open' : ''}`
+		buttonEl.setAttribute('aria-label', isPill ? label : 'Open feedback')
 		buttonEl.type = 'button'
 		buttonEl.style.background = `linear-gradient(135deg, ${theme.primary}, ${getGradientEnd(theme.primary)})`
 		buttonEl.innerHTML = isOpen
 			? `<span style="font-size:20px;">✕</span>`
-			: ''
-		// hideTrigger hides the default edge tab only; the panel, plugins,
-		// and the handle's open()/close() keep working so a host can drive
-		// the widget from its own UI. Hidden rather than unmounted so no
+			: isPill
+				? `<span aria-hidden="true">💬</span><span class="fb-btn-lbl">${escapeHtml(label)}</span>`
+				: ''
+		// 'none' hides the launcher only; the panel, plugins, and the
+		// handle's open()/close() keep working so a host can drive the
+		// widget from its own UI. Hidden rather than unmounted so no
 		// conditional (un)listen logic is needed.
-		buttonEl.style.display = hideTrigger ? 'none' : ''
-		buttonEl.setAttribute('aria-hidden', hideTrigger ? 'true' : 'false')
-		buttonEl.tabIndex = hideTrigger ? -1 : 0
+		buttonEl.style.display = hidden ? 'none' : ''
+		buttonEl.setAttribute('aria-hidden', hidden ? 'true' : 'false')
+		buttonEl.tabIndex = hidden ? -1 : 0
 	}
 
 	function renderBackdrop(): void {
@@ -916,6 +931,20 @@ export function initUseroFeedbackWidget(
 			}
 			if (next.hideTrigger !== undefined && next.hideTrigger !== hideTrigger) {
 				hideTrigger = next.hideTrigger
+				needsRender = true
+			}
+			if (
+				next.launcherType !== undefined &&
+				next.launcherType !== launcherTypeProp
+			) {
+				launcherTypeProp = next.launcherType
+				needsRender = true
+			}
+			if (
+				next.launcherLabel !== undefined &&
+				next.launcherLabel !== launcherLabel
+			) {
+				launcherLabel = next.launcherLabel
 				needsRender = true
 			}
 			// Non-render-affecting props: just swap refs.

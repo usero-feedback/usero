@@ -74,6 +74,10 @@ export interface UseroUser {
 
 export type WidgetPosition = 'right' | 'left'
 
+// Launcher shape. 'tab' is the screen-edge half-pill, 'button' is a
+// labelled pill in the corner named by `position`, 'none' renders none.
+export type WidgetLauncherType = 'tab' | 'button' | 'none'
+
 export interface WidgetTheme {
 	primary: string
 	background: string
@@ -97,10 +101,15 @@ export interface FeedbackWidgetProps {
 	environment?: string
 	baseUrl?: string
 	metadata?: Record<string, unknown>
-	// Privacy: when true, do not render the default edge trigger tab. The
-	// widget still mounts (panel, plugins, identity) so the host app can
-	// open it programmatically via the returned handle's `open()` (vanilla)
-	// or a ref (React). Default false, zero behaviour change.
+	// Which launcher to render. Default 'tab', the screen-edge half-pill.
+	// 'button' is a labelled corner pill placed by `position`. 'none'
+	// renders no launcher; the panel, plugins and identity still mount so
+	// the host can drive it via the handle's `open()` or a React ref.
+	launcherType?: WidgetLauncherType
+	// Text on the 'button' launcher. Ignored by the other launchers,
+	// defaults to `title`.
+	launcherLabel?: string
+	/** @deprecated Use `launcherType: 'none'`. Still honoured, but `launcherType` wins when both are set. */
 	hideTrigger?: boolean
 	// Privacy: when true, submissions omit pageUrl/pageTitle/referrer
 	// entirely instead of capturing them from window.location/document.

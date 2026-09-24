@@ -76,11 +76,29 @@ The widget auto-detects the OS color scheme via `prefers-color-scheme`. It picks
 | `environment`          | `string`                      | undefined                                     | Tag feedback with an environment           |
 | `baseUrl`              | `string`                      | `'https://usero.io'`                          | Override API host (self-hosted Usero)      |
 | `metadata`             | `Record<string, unknown>`     | undefined                                     | Arbitrary metadata attached to feedback    |
-| `hideTrigger`          | `boolean`                     | `false`                                       | Hide the default edge tab; open the widget yourself |
+| `launcherType`         | `'tab' \| 'button' \| 'none'` | `'tab'`                                       | Launcher shape: edge tab, labelled corner button, or none |
+| `launcherLabel`        | `string`                      | falls back to `title`                         | Text on the `'button'` launcher            |
+| `hideTrigger`          | `boolean`                     | `false`                                       | Deprecated, use `launcherType: 'none'`     |
 | `disablePageContext`   | `boolean`                     | `false`                                       | Don't send `pageUrl` / `pageTitle` / `referrer` |
 | `onSubmit`             | `(data) => void`              | undefined                                     | Fires after a successful submission        |
 | `onError`              | `(err: Error) => void`        | undefined                                     | Fires on init or submission error          |
 | `onOpen` / `onClose`   | `() => void`                  | undefined                                     | Fire when the panel opens/closes           |
+
+## Launcher
+
+`launcherType` picks what the visitor clicks to open the panel.
+
+- `'tab'` (default) is the half-pill stuck to the middle of the screen edge named by `position`.
+- `'button'` is a labelled pill in the bottom corner on that same side. `launcherLabel` sets the text and falls back to `title`.
+- `'none'` renders no launcher. The panel, plugins and identity still mount, so open the widget yourself via the handle's `open()` (vanilla) or a ref (React).
+
+```ts
+initUseroFeedbackWidget({
+  clientId: 'YOUR_CLIENT_ID',
+  launcherType: 'button',
+  launcherLabel: 'Report a bug',
+})
+```
 
 ## Privacy options
 
@@ -88,7 +106,7 @@ Two opt-in flags, both default `false` with no behaviour change unless you set t
 
 **`disablePageContext`** stops the widget capturing `pageUrl`, `pageTitle`, and `referrer` on submit. Useful for embeds where `document.title` or the URL can carry sensitive info, e.g. a desktop app shell (Tauri, Electron) whose window title holds a connection name or a local file path. The fields are omitted from the submission entirely, not sent empty.
 
-**`hideTrigger`** hides the widget's default edge tab so you can supply your own trigger UI and open the widget programmatically. The panel, plugins, and identity still mount as normal, only the built-in tab is hidden.
+**`hideTrigger`** hides the widget's default edge tab so you can supply your own trigger UI and open the widget programmatically. The panel, plugins, and identity still mount as normal, only the built-in tab is hidden. Deprecated in favour of `launcherType: 'none'`, which does the same thing; `launcherType` wins if you set both.
 
 ```tsx
 import { useRef } from 'react'

@@ -46,6 +46,10 @@ void propsB
 // handle exposes open()/close() for the hideTrigger use case.
 declare const propsWithPrivacy: FeedbackWidgetProps
 void ({ ...propsWithPrivacy, hideTrigger: true, disablePageContext: true } satisfies FeedbackWidgetProps)
+
+// Launcher options type-check, including the 'none' replacement for hideTrigger.
+void ({ ...propsWithPrivacy, launcherType: 'button', launcherLabel: 'Report a bug' } satisfies FeedbackWidgetProps)
+void ({ ...propsWithPrivacy, launcherType: 'none' } satisfies ReactProps)
 declare const widgetHandle: UseroFeedbackWidgetHandle
 widgetHandle.open()
 widgetHandle.close()

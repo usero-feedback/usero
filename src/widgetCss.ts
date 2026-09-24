@@ -253,6 +253,44 @@ export const FEEDBACK_CSS = `
   transform: translateY(-50%) scale(1.05);
 }
 
+/* Labelled corner pill. Rules sit after the tab ones so the shared
+   .fb-btn--right/left offsets and open transform are overridden. */
+.fb-btn--pill {
+  width: auto;
+  height: auto;
+  top: auto;
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  transform: none;
+  gap: 8px;
+  padding: 12px 18px;
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 600;
+  max-width: calc(100vw - 40px);
+  box-shadow: 0 4px 15px rgba(37, 99, 235, 0.3);
+}
+
+.fb-btn--pill.fb-btn--right {
+  right: 20px;
+  left: auto;
+}
+
+.fb-btn--pill.fb-btn--left {
+  left: 20px;
+  right: auto;
+}
+
+.fb-btn--pill.fb-btn--open {
+  transform: scale(1.05);
+}
+
+.fb-btn-lbl {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .fb-backdrop {
   position: fixed;
   top: 0;
