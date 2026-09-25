@@ -226,7 +226,9 @@ test('widget mounting over the SAME running instance adopts the recording', asyn
 	// No second recorder, no second session row.
 	assert.equal(createCalls().length, 1)
 	// Feedback submitted through the widget links to the live recording.
-	const linkage = instance.onFeedbackSubmit(ctx)
+	// onFeedbackSubmit is async since the session-context modes landed: with
+	// no live recording it may await a consent choice or a page snapshot.
+	const linkage = await instance.onFeedbackSubmit(ctx)
 	assert.ok(linkage, 'feedback links to the running replay')
 	assert.equal(linkage.sessionReplayId, 'replay-1')
 	assert.equal(typeof linkage.replayOffsetMs, 'number')
@@ -252,7 +254,7 @@ test('widget with a DIFFERENT replay instance links to the live recording instea
 
 	// The widget plugin's own ctx has no store, but feedback still resolves
 	// the page-wide live session.
-	const linkage = widgetPlugin.onFeedbackSubmit(ctx)
+	const linkage = await widgetPlugin.onFeedbackSubmit(ctx)
 	assert.ok(linkage)
 	assert.equal(linkage.sessionReplayId, 'replay-1')
 
@@ -285,7 +287,7 @@ test('server declining the session (accepted:false) leaves no linkable session',
 	instance.start()
 	await settle()
 	const { ctx } = makeWidgetCtx()
-	assert.equal(instance.onFeedbackSubmit(ctx), undefined)
+	assert.equal(await instance.onFeedbackSubmit(ctx), undefined)
 	instance.stop()
 	// Nothing to finalise: the session never came into existence.
 	assert.equal(finaliseCalls().length, 0)

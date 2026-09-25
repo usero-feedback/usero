@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.5.0
+
+Minor. New `recording` option on `sessionReplay()` with three modes: `'always'`, `'ask'` and `'never'`. Without it, the widget reads the mode from the project's Recording setting in Usero (Settings, Session replay) on each page load, so you can change it without shipping code, and it falls back to `'always'` if that fetch fails. **Always** is the default and records in the background as before. If no recording is running when someone sends feedback, the widget now attaches a page snapshot (one masked frame of the page) so the feedback still shows what they saw. **Ask first** records nothing in the background. When someone sends feedback, the widget asks "Include a snapshot of this page so we can see what you saw?" with Include and Don't include buttons. Nothing is captured before they answer, and a decline, Escape or 15 seconds with no answer means nothing is captured at all. The feedback sends either way. **Never** records nothing and never loads rrweb. The server enforces the project setting on every write, so a cached or pinned widget cannot store more than the setting allows. The prompt wording is exported as `RECORDING_CONSENT_COPY` and the mode type as `RecordingMode`. No change for existing integrations on the default mode, apart from the new submit-time snapshot.
+
 ## 1.4.2
 
 Patch. Fixes the replay offset recorded for human user tests. replayOffsetMs was captured at plugin init, before the mic prompt, so audio and replay drifted by however long the participant took to allow the microphone, and a mid-test navigation re-anchored it to the post-nav replay leg. The recorder now pins audioStartedAt at the first successful MediaRecorder start and replayStartedAt from the first replay leg, persists both across a resume, and computes the offset at finalise. No API or wire-format change.

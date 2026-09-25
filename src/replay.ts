@@ -60,8 +60,21 @@ import {
 	publishReplayStartMs,
 	reseatSdkSessionId,
 } from './identity'
-import { createPluginLogger, type UseroPlugin, type PluginContext } from './plugin'
+import { createPluginLogger, type PluginLogger, type UseroPlugin, type PluginContext } from './plugin'
+import {
+	fetchSessionContextMode,
+	requestSessionContextConsent,
+	type SessionContextMode,
+} from './sessionContext'
 import { DEFAULT_API_URL, type UseroUser } from './types'
+
+// Re-exported under the public `recording` name so consumers typing the option,
+// and anyone rewording the consent prompt, have a single import site.
+export {
+	SESSION_CONTEXT_CONSENT_COPY as RECORDING_CONSENT_COPY,
+	DEFAULT_SESSION_CONTEXT_MODE as DEFAULT_RECORDING_MODE,
+	type SessionContextMode as RecordingMode,
+} from './sessionContext'
 
 export interface ReplaySampling {
 	mousemove?: number
@@ -112,6 +125,20 @@ export interface SessionReplayOptions {
 	// PluginContext baseUrl threaded through by the widget (plugin mode) or
 	// to https://usero.io (standalone mode).
 	apiUrl?: string
+	// Recording mode override. When set, the SDK does NOT fetch the
+	// client's configured mode at init and uses this value for the life of
+	// the page. Leave it unset (the default) so the mode follows whatever
+	// the client set in their Usero dashboard.
+	//
+	//   'always' - record ambiently, and snapshot the page at submit time
+	//              if no recording happens to be live.
+	//   'ask'    - never record ambiently; ask the user at submit time,
+	//              before anything is captured.
+	//   'never'  - capture nothing; rrweb is never loaded.
+	//
+	// The server independently enforces the client's configured mode, so
+	// this option can only ever be as permissive as the dashboard setting.
+	recording?: SessionContextMode
 
 	// ---- Standalone mode only -------------------------------------------
 	// The three options below feed `.start()` (recording without the
@@ -255,6 +282,19 @@ const UPLOAD_DROP_WARN_INTERVAL_MS = 5000
 // just to reference a constant. Magic number matches estimateEventBytes above
 // and rrweb's stable public event-type enum.
 const RRWEB_EVENT_TYPE_FULL_SNAPSHOT = 2
+// rrweb EventType.Meta: carries the page href and viewport size, and is
+// emitted immediately before every FullSnapshot. A snapshot-only session
+// needs it, otherwise the viewer has no page URL and no canvas size.
+const RRWEB_EVENT_TYPE_META = 4
+// Hard ceiling on the whole submit-time snapshot attach: load rrweb,
+// capture, create the session row, upload one chunk, finalise. Feedback
+// capture is the product; page context is a bonus. If the bonus is not
+// ready in this long we submit the feedback with nothing attached rather
+// than make the user wait.
+const SNAPSHOT_ATTACH_BUDGET_MS = 1500
+// Slice of that budget allowed for loading rrweb and getting the snapshot
+// event out of it, leaving the rest for the three network calls.
+const SNAPSHOT_CAPTURE_BUDGET_MS = 700
 // Minimum gap between back-to-back snapshot-isolation flushes. Snapshots
 // normally fire every checkoutEveryMs (default 60s), but rrweb can emit
 // additional ones on SPA route changes via checkoutEveryNms. Keeping this
@@ -345,6 +385,20 @@ interface CreateSessionBody {
 	referrer?: string
 	startedAt: string
 	environment?: string
+	// This session is a single page snapshot taken at feedback-submit
+	// time, not an ambient recording. The server treats it differently and
+	// uses it to enforce the client's session-context mode.
+	snapshotOnly?: boolean
+	// The user was asked and said yes. Only meaningful alongside
+	// `snapshotOnly`; the server rejects an 'ask'-mode create without it.
+	consented?: boolean
+}
+
+// Extra create-session fields for the submit-time snapshot path. Absent for
+// ambient recordings, which is what the server reads as "not a snapshot".
+interface SnapshotSessionFlags {
+	snapshotOnly: true
+	consented: boolean
 }
 
 async function createSession(
@@ -353,6 +407,7 @@ async function createSession(
 	sdkSessionId: string,
 	anonymousId: string,
 	environment?: string,
+	snapshotFlags?: SnapshotSessionFlags,
 ): Promise<CreateSessionResult | null> {
 	try {
 		const startUrl =
@@ -371,6 +426,10 @@ async function createSession(
 			startedAt: new Date().toISOString(),
 		}
 		if (environment !== undefined) body.environment = environment
+		if (snapshotFlags) {
+			body.snapshotOnly = snapshotFlags.snapshotOnly
+			body.consented = snapshotFlags.consented
+		}
 		const res = await fetch(joinUrl(apiUrl, '/api/replay-sessions'), {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
@@ -464,7 +523,13 @@ async function uploadChunk(
 	return { ok: false, stopSession: false }
 }
 
+// Test seam. rrweb needs a real DOM, which the node test suite does not
+// have, so tests swap in a fake recorder here to exercise the snapshot
+// path. Always null in production; only `__test__.setRrwebLoader` sets it.
+let rrwebLoaderOverride: (() => Promise<RrwebRecord | null>) | null = null
+
 async function loadRrwebRecord(): Promise<RrwebRecord | null> {
+	if (rrwebLoaderOverride) return rrwebLoaderOverride()
 	try {
 		const mod: unknown = await import(/* webpackChunkName: "rrweb" */ 'rrweb')
 		if (
@@ -863,15 +928,41 @@ function scheduleShadowSnapshot(store: ReplayStore, ctx: PluginContext): void {
 	}
 }
 
+// POSTs the finalise call for a session. Shared by the ambient recording
+// teardown and the submit-time snapshot path, which has no store to hang
+// off. Resolves once the request settles; never rejects.
+async function postFinalise(
+	apiUrl: string,
+	clientId: string,
+	sessionReplayId: string,
+	logger: PluginLogger,
+): Promise<void> {
+	const url = joinUrl(
+		apiUrl,
+		`/api/replay-sessions/${encodeURIComponent(sessionReplayId)}/finalise`,
+	)
+	try {
+		await fetch(url, {
+			method: 'POST',
+			body: JSON.stringify({ clientId, endedAt: new Date().toISOString() }),
+			headers: { 'Content-Type': 'application/json' },
+			keepalive: true,
+		})
+	} catch (err) {
+		logger.warn('finalise fetch failed', err)
+	}
+}
+
 function finalise(store: ReplayStore, ctx: PluginContext, opts: { useBeacon: boolean }): void {
 	if (!store.sessionReplayId) return
 	if (store.pendingEvents.length > 0) flushPendingChunk(store, ctx)
-	const url = joinUrl(
-		store.options.apiUrl,
-		`/api/replay-sessions/${encodeURIComponent(store.sessionReplayId)}/finalise`,
-	)
-	const body = JSON.stringify({ clientId: store.clientId, endedAt: new Date().toISOString() })
+	const sessionReplayId = store.sessionReplayId
 	if (opts.useBeacon && typeof navigator !== 'undefined' && navigator.sendBeacon) {
+		const url = joinUrl(
+			store.options.apiUrl,
+			`/api/replay-sessions/${encodeURIComponent(sessionReplayId)}/finalise`,
+		)
+		const body = JSON.stringify({ clientId: store.clientId, endedAt: new Date().toISOString() })
 		try {
 			const blob = new Blob([body], { type: 'application/json' })
 			navigator.sendBeacon(url, blob)
@@ -880,12 +971,178 @@ function finalise(store: ReplayStore, ctx: PluginContext, opts: { useBeacon: boo
 			ctx.logger.warn('finalise sendBeacon threw', err)
 		}
 	}
-	void fetch(url, {
-		method: 'POST',
-		body,
-		headers: { 'Content-Type': 'application/json' },
-		keepalive: true,
-	}).catch(err => ctx.logger.warn('finalise fetch failed', err))
+	void postFinalise(store.options.apiUrl, store.clientId, sessionReplayId, ctx.logger)
+}
+
+// ---- Submit-time page snapshot -----------------------------------------
+//
+// When feedback is submitted and no ambient recording is live (sampled
+// out, bot-gated, or 'ask' mode where we deliberately never recorded), we
+// can still give the team the single most useful frame: what the page
+// looked like at the moment the user complained.
+//
+// The capture is one rrweb Meta + FullSnapshot pair, taken with the SAME
+// masking defaults the ambient recorder uses, then shipped through the
+// existing session plumbing (create -> chunk seq 0 -> finalise) with
+// `snapshotOnly: true`. No new endpoint, and the viewer plays it back as a
+// one-frame session.
+
+// The masking-relevant subset of the recorder options. Kept as its own
+// type so the snapshot path provably cannot drift from the recorder: both
+// read the same resolved values.
+interface SnapshotMaskingOptions {
+	maskAllInputs: boolean
+	maskTextSelector: string
+	inlineStylesheet: boolean
+	blockSelector: string
+}
+
+// Starts rrweb, keeps only the Meta + FullSnapshot events, and stops it
+// again as soon as the snapshot lands. Returns null if rrweb will not load,
+// record() throws, or no snapshot arrives inside `budgetMs`.
+export async function captureSnapshotEvents(
+	masking: SnapshotMaskingOptions,
+	logger: PluginLogger,
+	budgetMs: number,
+): Promise<RrwebEvent[] | null> {
+	const record = await loadRrwebRecord()
+	if (!record) {
+		logger.warn('rrweb failed to load, page snapshot skipped')
+		return null
+	}
+	return new Promise<RrwebEvent[] | null>(resolve => {
+		const events: RrwebEvent[] = []
+		let hasSnapshot = false
+		let settled = false
+		let stopFn: (() => void) | null = null
+		let stopped = false
+		let timer: ReturnType<typeof setTimeout> | null = null
+
+		// rrweb calls `emit` synchronously from inside `record()`, so the
+		// stop function may not be assigned yet when we settle. Stopping is
+		// therefore idempotent and re-run once record() returns.
+		const stopRecorder = (): void => {
+			if (stopped || !stopFn) return
+			stopped = true
+			try {
+				stopFn()
+			} catch {
+				// Already stopped.
+			}
+		}
+		const finish = (value: RrwebEvent[] | null): void => {
+			if (settled) return
+			settled = true
+			if (timer !== null) clearTimeout(timer)
+			stopRecorder()
+			resolve(value)
+		}
+
+		timer = setTimeout(() => {
+			logger.warn('page snapshot timed out before rrweb produced a full snapshot')
+			finish(null)
+		}, budgetMs)
+
+		try {
+			stopFn = record({
+				emit: event => {
+					if (settled) return
+					if (
+						event.type !== RRWEB_EVENT_TYPE_META &&
+						event.type !== RRWEB_EVENT_TYPE_FULL_SNAPSHOT
+					) {
+						return
+					}
+					events.push(event)
+					if (event.type === RRWEB_EVENT_TYPE_FULL_SNAPSHOT) hasSnapshot = true
+					// The FullSnapshot is the whole point and Meta always
+					// precedes it, so the pair is complete the moment the
+					// snapshot lands.
+					if (hasSnapshot) finish(events)
+				},
+				maskAllInputs: masking.maskAllInputs,
+				maskTextSelector: masking.maskTextSelector || undefined,
+				inlineStylesheet: masking.inlineStylesheet,
+				blockSelector: masking.blockSelector,
+				errorHandler: (error: unknown): boolean => {
+					logger.warn('rrweb emit error swallowed during page snapshot', error)
+					return true
+				},
+			})
+		} catch (err) {
+			logger.error('rrweb record() threw during page snapshot', err)
+			finish(null)
+			return
+		}
+		// Covers the synchronous-emit case above.
+		if (settled) stopRecorder()
+	})
+}
+
+interface SnapshotUploadParams {
+	apiUrl: string
+	clientId: string
+	sdkSessionId: string
+	anonymousId: string
+	environment?: string
+	events: RrwebEvent[]
+	// True only when the user was shown the consent prompt and chose to
+	// include. Forwarded verbatim; the server refuses an 'ask'-mode create
+	// without it.
+	consented: boolean
+	logger: PluginLogger
+}
+
+// Ships a captured snapshot as a snapshot-only session: create, one chunk
+// at seq 0, finalise. Returns the sessionReplayId, or null if the server
+// declined the session or the chunk failed to land (an empty session row
+// is worse than no link, so we do not attach one).
+async function uploadSnapshotSession(params: SnapshotUploadParams): Promise<string | null> {
+	const { apiUrl, clientId, events, logger } = params
+	const created = await createSession(
+		apiUrl,
+		clientId,
+		params.sdkSessionId,
+		params.anonymousId,
+		params.environment,
+		{ snapshotOnly: true, consented: params.consented },
+	)
+	if (!created) {
+		logger.warn('snapshot session create failed')
+		return null
+	}
+	if (!created.accepted) {
+		logger.info(`snapshot session declined: ${created.dropReason ?? 'unknown'}`)
+		return null
+	}
+	if (!created.sessionReplayId) {
+		logger.error('server accepted snapshot session but returned no sessionReplayId')
+		return null
+	}
+	const sessionReplayId = created.sessionReplayId
+	const bytes = await gzipBytes(JSON.stringify(events))
+	const firstTs = events[0]?.timestamp ?? 0
+	const lastTs = events[events.length - 1]?.timestamp ?? firstTs
+	// One attempt only: the caller is holding a feedback submit open, so a
+	// retry with backoff would blow the budget and get discarded anyway.
+	const result = await uploadChunk(
+		apiUrl,
+		sessionReplayId,
+		clientId,
+		0,
+		bytes,
+		events.length,
+		Math.max(0, lastTs - firstTs),
+		logger,
+		1,
+		0,
+	)
+	if (!result.ok) {
+		logger.warn('snapshot chunk upload failed; not attaching the session')
+		return null
+	}
+	await postFinalise(apiUrl, clientId, sessionReplayId, logger)
+	return sessionReplayId
 }
 
 export interface CurrentSessionHandle {
@@ -1012,6 +1269,7 @@ export function sessionReplay(options: SessionReplayOptions = {}): SessionReplay
 		user,
 		getUser,
 		environment: standaloneEnvironment,
+		recording: sessionContextOverride,
 		...replayOptions
 	} = options
 	const merged: ResolvedOptions = {
@@ -1039,6 +1297,75 @@ export function sessionReplay(options: SessionReplayOptions = {}): SessionReplay
 	let delegatedToGlobal = false
 	const standaloneLogger = createPluginLogger('session-replay')
 
+	// The client's session-context mode, fetched ONCE per page load and
+	// held in memory only. Kicked off at init so the submit path almost
+	// never waits on it; both the bootstrap and the submit path await this
+	// same promise, so they can never disagree about the mode.
+	let modePromise: Promise<SessionContextMode> | null = null
+	const resolveSessionContextMode = (
+		apiUrl: string,
+		clientId: string,
+	): Promise<SessionContextMode> => {
+		if (sessionContextOverride) return Promise.resolve(sessionContextOverride)
+		modePromise ??= fetchSessionContextMode(apiUrl, clientId)
+		return modePromise
+	}
+
+	// Captures the page and ships it as a snapshot-only session, bounded by
+	// SNAPSHOT_ATTACH_BUDGET_MS end to end. Returns the submission patch, or
+	// undefined if anything failed or ran long, in which case the feedback
+	// submits with no page context attached.
+	//
+	// `consented` is only ever true on the 'ask' path, and this function is
+	// only reached there AFTER the user said yes, so a decline means no
+	// capture ever happens rather than a capture we throw away.
+	const attachPageSnapshot = async (
+		ctx: PluginContext,
+		apiUrl: string,
+		consented: boolean,
+	): Promise<{ sessionReplayId: string; replayOffsetMs: number } | undefined> => {
+		const work = (async (): Promise<string | null> => {
+			const events = await captureSnapshotEvents(
+				{
+					maskAllInputs: merged.maskAllInputs,
+					maskTextSelector: merged.maskTextSelector,
+					inlineStylesheet: merged.inlineStylesheet,
+					blockSelector: merged.blockSelector,
+				},
+				ctx.logger,
+				SNAPSHOT_CAPTURE_BUDGET_MS,
+			)
+			if (!events || events.length === 0) return null
+			return uploadSnapshotSession({
+				apiUrl,
+				clientId: ctx.clientId,
+				sdkSessionId: ctx.getSdkSessionId ? ctx.getSdkSessionId() : mintSdkSessionId(),
+				anonymousId: ctx.getAnonymousId ? ctx.getAnonymousId() : getOrMintAnonymousId(),
+				environment: standaloneEnvironment ?? ctx.environment,
+				events,
+				consented,
+				logger: ctx.logger,
+			})
+		})()
+		// Whichever finishes first wins. If the budget wins, any in-flight
+		// upload is simply not awaited: the session still lands server-side
+		// but this submission goes out without it.
+		const timeout = new Promise<null>(resolve => {
+			setTimeout(() => resolve(null), SNAPSHOT_ATTACH_BUDGET_MS)
+		})
+		const sessionReplayId = await Promise.race([
+			work.catch(err => {
+				ctx.logger.warn('page snapshot attach failed', err)
+				return null
+			}),
+			timeout,
+		])
+		if (!sessionReplayId) return undefined
+		// A snapshot is a single frame taken at the moment of submit, so
+		// the feedback sits at the very start of it.
+		return { sessionReplayId, replayOffsetMs: 0 }
+	}
+
 	const removeListeners = (store: ReplayStore): void => {
 		if (store.startTimer) {
 			clearTimeout(store.startTimer)
@@ -1062,14 +1389,20 @@ export function sessionReplay(options: SessionReplayOptions = {}): SessionReplay
 	// rrweb start). Identical for both modes; only the ctx differs.
 	const startWithContext = (ctx: PluginContext): void => {
 			if (typeof window === 'undefined') return
-			if (merged.sampleRate < 1 && Math.random() >= merged.sampleRate) {
-				ctx.logger.debug('skipped by sampleRate')
-				return
-			}
 
 			const apiUrl = merged.apiUrl || ctx.baseUrl
 			if (!apiUrl) {
 				ctx.logger.error('session-replay needs an apiUrl (via options or PluginContext)')
+				return
+			}
+			// Kick the config fetch off now, before the sample gate, so the
+			// mode is resolved even on a run that never records and the
+			// submit path does not pay for it. Fire and forget: begin()
+			// awaits the same promise below.
+			void resolveSessionContextMode(apiUrl, ctx.clientId)
+
+			if (merged.sampleRate < 1 && Math.random() >= merged.sampleRate) {
+				ctx.logger.debug('skipped by sampleRate')
 				return
 			}
 			// Resolve the core-owned per-tab id LAZILY (at createSession time,
@@ -1162,6 +1495,19 @@ export function sessionReplay(options: SessionReplayOptions = {}): SessionReplay
 			document.addEventListener('visibilitychange', onVisibilityChange)
 
 			const begin = async (): Promise<void> => {
+				if (store.cancelled) return
+				// Ambient recording is only allowed in 'always' mode. In 'ask'
+				// we wait to be invited at submit time; in 'never' we do
+				// nothing at all. Either way we bail BEFORE creating the
+				// session row and before startRecording, so rrweb is never
+				// loaded and no bytes leave the browser.
+				const mode = await resolveSessionContextMode(apiUrl, ctx.clientId)
+				if (mode !== 'always') {
+					ctx.logger.info(`ambient recording off: recording is set to '${mode}'`)
+					store.stopped = true
+					removeListeners(store)
+					return
+				}
 				if (store.cancelled) return
 				// Replay-only customers may never open the widget, so the host's
 				// user state never gets polled by the widget's interaction
@@ -1260,18 +1606,35 @@ export function sessionReplay(options: SessionReplayOptions = {}): SessionReplay
 			startedAs = 'plugin'
 			startWithContext(ctx)
 		},
-		onFeedbackSubmit(ctx) {
+		async onFeedbackSubmit(ctx) {
 			// Fall back to the page-wide live recording when this ctx has no
 			// store of its own (widget mounted while another instance's
 			// standalone recording was running), so feedback still deep-links.
 			const store = ctx.getStore<ReplayStore>() ?? readGlobalSlot()?.store
-			if (!store || store.cancelled || store.stopped) return undefined
-			if (!store.sessionReplayId) return undefined
-			const offsetMs =
-				store.recordingStartedAt !== null
-					? Math.max(0, Date.now() - store.recordingStartedAt)
-					: 0
-			return { sessionReplayId: store.sessionReplayId, replayOffsetMs: offsetMs }
+			if (store && !store.cancelled && !store.stopped && store.sessionReplayId) {
+				const offsetMs =
+					store.recordingStartedAt !== null
+						? Math.max(0, Date.now() - store.recordingStartedAt)
+						: 0
+				return { sessionReplayId: store.sessionReplayId, replayOffsetMs: offsetMs }
+			}
+
+			// No live recording: sampled out, bot-gated, never started, or
+			// 'ask' mode where we deliberately never recorded. What we do
+			// next is entirely the client's session-context mode.
+			if (typeof window === 'undefined') return undefined
+			const apiUrl = merged.apiUrl || ctx.baseUrl || DEFAULT_API_URL
+			const mode = await resolveSessionContextMode(apiUrl, ctx.clientId)
+			if (mode === 'never') return undefined
+			if (mode === 'ask') {
+				// Ask BEFORE capturing. A decline means the snapshot is never
+				// taken, so there is no copy of it anywhere to discard, and
+				// nothing about this page ever reaches the network.
+				const consented = await requestSessionContextConsent({ logger: ctx.logger })
+				if (!consented) return undefined
+				return attachPageSnapshot(ctx, apiUrl, true)
+			}
+			return attachPageSnapshot(ctx, apiUrl, false)
 		},
 		onDestroy(ctx) {
 			if (delegatedToGlobal) {
@@ -1404,4 +1767,15 @@ export const __test__ = {
 	UPLOAD_DROP_WARN_INTERVAL_MS,
 	DEFAULTS,
 	readGlobalSlot,
+	captureSnapshotEvents,
+	uploadSnapshotSession,
+	postFinalise,
+	RRWEB_EVENT_TYPE_META,
+	SNAPSHOT_ATTACH_BUDGET_MS,
+	SNAPSHOT_CAPTURE_BUDGET_MS,
+	// rrweb needs a real DOM, so the node suite swaps in a fake recorder to
+	// exercise the snapshot path. Pass null to restore the real loader.
+	setRrwebLoader: (fn: (() => Promise<RrwebRecord | null>) | null): void => {
+		rrwebLoaderOverride = fn
+	},
 }

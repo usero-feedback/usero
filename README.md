@@ -236,6 +236,16 @@ At most one replay recording runs per page, whichever way it was started. The ru
 
 Tag any DOM node you want masked at the source: `<div data-usero-mask>...</div>`. Tag entire subtrees you want skipped with `data-usero-block`.
 
+### Recording: always, ask first, or never
+
+Whether visitors are recorded is a project setting in Usero (Settings, Session replay, Recording), fetched on every page load, so you change it without shipping code:
+
+- **Always** (default): record in the background. If no recording is running when someone sends feedback, a page snapshot (one masked frame of the page) is attached instead.
+- **Ask first**: nothing is recorded in the background. When someone sends feedback, the widget asks "Include a snapshot of this page so we can see what you saw?" A decline, Escape, or 15 seconds with no answer means nothing is captured. The feedback sends either way.
+- **Never**: nothing is recorded and Usero refuses new recordings for the project, even from a cached widget.
+
+To pin the mode in code, pass `recording: 'always' | 'ask' | 'never'` to `sessionReplay()`. It skips the settings fetch, and Usero still refuses anything the project setting does not allow. The prompt wording is exported as `RECORDING_CONSENT_COPY` and the type as `RecordingMode`.
+
 Standalone-only options: `clientId` (required for `.start()`), `user` / `getUser` (identify the current user), and `apiUrl` (override the API host, defaults to `https://usero.io`). Advanced chunking knobs (`chunkSeconds`, `chunkMaxEvents`, `chunkMaxBytes`, `chunkMaxAttempts`, `checkoutEveryMs`) are documented in the `SessionReplayOptions` type.
 
 ## Headless (bring your own UI)
