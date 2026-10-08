@@ -64,11 +64,9 @@ jobs:
       - if: steps.check.outputs.already_published != 'true'
         run: npm ci
 
+      # npm test builds dist/ and the dist-test/ replay seams the tests import.
       - if: steps.check.outputs.already_published != 'true'
-        run: npm run build
-
-      - if: steps.check.outputs.already_published != 'true'
-        run: node --test tests/*.test.mjs
+        run: npm test
 
       - name: Bump version (manual dispatch only)
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run != true && inputs.skip_bump != true
