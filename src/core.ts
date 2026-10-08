@@ -211,6 +211,9 @@ export interface PluginRuntime {
 	// for the merge policy). A plugin that throws or rejects is logged and
 	// skipped, never blocking the submit.
 	enrichSubmission: (submission: FeedbackSubmission) => Promise<FeedbackSubmission>
+	// Hand the in-flight submit to every plugin's afterFeedbackSubmit. Never
+	// awaited and never throws.
+	notifySubmitted: (submission: FeedbackSubmission, response: Promise<SubmissionResponse>) => void
 	// Fire every plugin's onDestroy (errors caught and logged) and clear
 	// plugin stores. Idempotent.
 	destroy: () => void
@@ -287,6 +290,20 @@ export function createPluginRuntime(options: PluginRuntimeOptions): PluginRuntim
 			})
 			const patches = await Promise.all(patchPromises)
 			return mergePluginPatches(submission, patches)
+		},
+		notifySubmitted: (submission, response) => {
+			const feedbackId = response.then(feedbackIdOf)
+			const replayLinkToken = response.then(replayLinkTokenOf)
+			for (const plugin of plugins) {
+				if (!plugin.afterFeedbackSubmit) continue
+				const ctx = pluginContexts.get(plugin.name)
+				if (!ctx) continue
+				try {
+					plugin.afterFeedbackSubmit(ctx, { submission, feedbackId, replayLinkToken })
+				} catch (err) {
+					ctx.logger.error('afterFeedbackSubmit threw', err)
+				}
+			}
 		},
 		destroy: () => {
 			if (destroyed) return
@@ -389,11 +406,29 @@ export function buildFeedbackSubmission(
 // POST the enriched result. Never throws: FeedbackApiClient.submitFeedback
 // converts transport failures into `{ success: false, error }`, and plugin
 // errors are caught per-plugin inside enrichSubmission.
+//
+// Critical path rule: nothing between the Submit click and this POST may
+// await a network request or a capture. Background work (replay snapshot,
+// linking) hangs off afterFeedbackSubmit once the POST is on the wire.
 export async function submitWithPlugins(
 	apiClient: FeedbackApiClient,
 	runtime: PluginRuntime,
 	submission: FeedbackSubmission,
 ): Promise<SubmissionResponse> {
 	const enriched = await runtime.enrichSubmission(submission)
-	return apiClient.submitFeedback(enriched)
+	const response = apiClient.submitFeedback(enriched)
+	runtime.notifySubmitted(enriched, response)
+	return response
+}
+
+function feedbackIdOf(response: SubmissionResponse): string | null {
+	const body: unknown = response.success ? response.data : null
+	if (typeof body !== 'object' || body === null || !('feedbackId' in body)) return null
+	return typeof body.feedbackId === 'string' ? body.feedbackId : null
+}
+
+function replayLinkTokenOf(response: SubmissionResponse): string | null {
+	const body: unknown = response.success ? response.data : null
+	if (typeof body !== 'object' || body === null || !('replayLinkToken' in body)) return null
+	return typeof body.replayLinkToken === 'string' ? body.replayLinkToken : null
 }

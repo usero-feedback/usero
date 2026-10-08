@@ -72,7 +72,8 @@
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
-    "test": "npm run build && node --test tests/*.test.mjs",
+    "test": "npm run build && tsup --config tsup.test.config.ts --silent && node --test tests/*.test.mjs",
+    "perf": "npm run build && node scripts/perf-submit.mjs",
     "prepublishOnly": "npm run clean && npm run build && npm test"
   },
   "keywords": [
@@ -103,6 +104,7 @@
   "devDependencies": {
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
+    "playwright-core": "1.57.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "tsup": "^8.3.0",

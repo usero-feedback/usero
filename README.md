@@ -145,7 +145,7 @@ The headless controller (`createUseroFeedback` / `useUseroFeedback`) never rende
 
 ## Session replay
 
-Record what your users actually did, with or without the feedback widget. Recording streams rrweb events to Usero in gzipped chunks while the user is on the page, so you capture whole sessions rather than only the moments around a feedback submission.
+Record what your users actually did, with or without the feedback widget. Recording streams rrweb events to Usero in gzipped chunks while the user is on the page, so you capture whole sessions rather than only the moments around a feedback submission. On a slow connection the SDK merges waiting chunks into larger ones instead of dropping them, and sends what it still holds when the page is hidden or closed.
 
 `rrweb` ships inside the replay chunk, so `npm install @usero/sdk` is the only install step. Replay lives in its own subpath export (`@usero/sdk/replay`), so consumers who never import it pay zero rrweb bytes on the base bundle. Even consumers who DO import it don't pay rrweb's bytes upfront: rrweb lazy-loads at runtime via dynamic import only once a recording actually starts.
 
@@ -240,11 +240,13 @@ Tag any DOM node you want masked at the source: `<div data-usero-mask>...</div>`
 
 Whether visitors are recorded is a project setting in Usero (Settings, Session replay, Recording), fetched on every page load, so you change it without shipping code:
 
-- **Always** (default): record in the background. If no recording is running when someone sends feedback, a page snapshot (one masked frame of the page) is attached instead.
-- **Ask first**: nothing is recorded in the background. When someone sends feedback, the widget asks "Include a snapshot of this page so we can see what you saw?" A decline, Escape, or 15 seconds with no answer means nothing is captured. The feedback sends either way.
-- **Never**: nothing is recorded and Usero refuses new recordings for the project, even from a cached widget.
+- **Always** (default): record in the background. If no recording is running when someone sends feedback (sampled out, or `startAfterMs` not reached yet), the feedback sends first, then the widget takes a page snapshot (one masked frame of the page) and Usero links it to that feedback.
+- **Ask first**: nothing is recorded in the background. The feedback sends first, then the widget asks "Thanks, it's sent! Want to include a snapshot of this page too?" with Include and Don't include buttons. Nothing is captured until they pick Include. Don't include, Escape, or 15 seconds with no answer means nothing is captured at all.
+- **Never**: nothing is recorded, no snapshot is taken, rrweb is never loaded, and Usero refuses new recordings for the project, even from a cached widget.
 
-To pin the mode in code, pass `recording: 'always' | 'ask' | 'never'` to `sessionReplay()`. It skips the settings fetch, and Usero still refuses anything the project setting does not allow. The prompt wording is exported as `RECORDING_CONSENT_COPY` and the type as `RecordingMode`.
+Replay never slows down sending feedback. Nothing is captured or requested before the feedback POST, and the snapshot is taken after the thank-you message has painted, with the widget and the Ask first prompt left out of it. The snapshot's session is created with the feedback id and a one-time token from the feedback response, so Usero links the two however long the upload takes, and only the browser that sent the feedback can attach a snapshot to it. Recording chunks, the snapshot's included, upload as `POST` requests with no CORS preflight.
+
+If the settings fetch fails, the widget falls back to Always, the behaviour from before this setting existed. To pin the mode in code, pass `recording: 'always' | 'ask' | 'never'` to `sessionReplay()`. It skips the settings fetch, and Usero still refuses anything the project setting does not allow. The prompt wording is exported as `RECORDING_CONSENT_COPY` and the type as `RecordingMode`.
 
 Standalone-only options: `clientId` (required for `.start()`), `user` / `getUser` (identify the current user), and `apiUrl` (override the API host, defaults to `https://usero.io`). Advanced chunking knobs (`chunkSeconds`, `chunkMaxEvents`, `chunkMaxBytes`, `chunkMaxAttempts`, `checkoutEveryMs`) are documented in the `SessionReplayOptions` type.
 
@@ -357,6 +359,8 @@ export function consoleCapture(): UseroPlugin {
 ```
 
 Plugins return a `Partial<FeedbackSubmission>` from `onFeedbackSubmit`. Top-level keys are shallow-merged into the outgoing payload (later plugins win wholesale). `metadata` is deep-merged one level so multiple plugins can each contribute their own metadata keys without clobbering each other.
+
+`onFeedbackSubmit` runs before the feedback is sent, so return synchronously from what you already hold in memory and never await a request there. For slower work, use `afterFeedbackSubmit(ctx, { submission, feedbackId })`: it runs once the POST is on the wire, is never awaited, and `feedbackId` resolves with the created id (or `null` if the submit failed).
 
 ### `widget.whenReady()`
 

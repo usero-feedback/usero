@@ -31,11 +31,11 @@
 //      session and getCurrentSession() returns null.
 //   2. Recording: lazy-load rrweb, append events to a buffer, flush a
 //      chunk every `chunkSeconds` (or sooner if the buffer is large).
-//      Each chunk is gzipped via CompressionStream and PUT to
-//      /api/replay-sessions/:id/chunks/:seq with raw bytes + the three
-//      X-Usero-* headers (Client-Id, Event-Count, Duration-Ms). Retries
-//      with exponential backoff. R2 head-check makes retries idempotent
-//      server-side. A chunk PUT returning 409 stops the session.
+//      Each chunk is gzipped via CompressionStream and POSTed as text/plain
+//      to /api/replay-sessions/:id/chunks/:seq, with clientId, eventCount,
+//      durationMs and droppedBefore in the query string (no preflight). One
+//      serial upload lane, exponential backoff; the server's unique
+//      (session, seq) index makes retries idempotent. A 409 stops the session.
 //   3. onFeedbackSubmit: returns `{sessionReplayId, replayOffsetMs}` so
 //      the feedback record can FK at the moment of submit. Does NOT
 //      attach `replayEvents` (legacy field) — chunked uploads carry the
@@ -60,7 +60,13 @@ import {
 	publishReplayStartMs,
 	reseatSdkSessionId,
 } from './identity'
-import { createPluginLogger, type PluginLogger, type UseroPlugin, type PluginContext } from './plugin'
+import {
+	createPluginLogger,
+	type FeedbackSubmitOutcome,
+	type PluginLogger,
+	type UseroPlugin,
+	type PluginContext,
+} from './plugin'
 import {
 	fetchSessionContextMode,
 	requestSessionContextConsent,
@@ -115,7 +121,8 @@ export interface SessionReplayOptions {
 	// 512_000 (~500 KB pre-gzip). Keeps memory pressure bounded on event-heavy
 	// pages even when chunkMaxEvents hasn't been hit.
 	chunkMaxBytes?: number
-	// Max attempts per chunk before giving up. Default 5.
+	// Max attempts per chunk before giving up (the gap is then reported to the server). Default 8,
+	// with backoff capped at 30s, so a chunk rides out roughly two minutes offline.
 	chunkMaxAttempts?: number
 	// Force rrweb to take a fresh full snapshot every N ms. This resets
 	// rrweb's internal mirror so detached DOM (e.g. SPA route changes)
@@ -238,8 +245,12 @@ interface ReplayStore {
 	// don't trigger a flush storm.
 	lastSnapshotFlushAt: number
 	nextChunkSeq: number
+	// Upload lane: batches waiting to be sealed, sealed chunks waiting to be sent, and the
+	// lane's drain promise. One request at a time, so slow networks merge batches instead of dropping.
+	uploadBacklog: UploadBatch[]
+	sealedChunks: SealedChunk[]
 	uploadQueue: Promise<void>
-	pendingUploads: number
+	uploadLaneRunning: boolean
 	chunkFlushTimer: ReturnType<typeof setInterval> | null
 	startTimer: ReturnType<typeof setTimeout> | null
 	pageHideHandler: (() => void) | null
@@ -268,15 +279,46 @@ const DEFAULTS: ResolvedOptions = {
 	chunkSeconds: 3,
 	chunkMaxEvents: 1000,
 	chunkMaxBytes: 512_000,
-	chunkMaxAttempts: 5,
+	chunkMaxAttempts: 8,
 	checkoutEveryMs: 60_000,
 	apiUrl: '',
 }
 
+// A batch of events not yet assigned a seq. Waiting batches merge, so a slow network
+// produces fewer, larger chunks rather than dropped ones.
+interface UploadBatch {
+	events: RrwebEvent[]
+	estBytes: number
+	firstTs: number
+	lastTs: number
+	hasSnapshot: boolean
+}
+
+// A batch with its seq fixed. Seqs are assigned in capture order at seal time.
+interface SealedChunk {
+	seq: number
+	bytes: Promise<Uint8Array>
+	eventCount: number
+	durationMs: number
+	hasSnapshot: boolean
+	droppedBefore: number
+	// Set when the unload flush already fired this chunk; the lane only retries if it failed.
+	unloadSend: Promise<boolean> | null
+}
+
 const SDK_SESSION_STORAGE_KEY = 'usero:session-replay:sdk-session-id'
 const HARD_CHUNK_BYTE_CAP = 4 * 1024 * 1024
-const MAX_PENDING_UPLOADS = 3
+// Memory ceiling for batches waiting on the network (estimated bytes). Past it, the oldest
+// batches are dropped, counted, and reported as a gap on the next chunk.
+const MAX_BACKLOG_BYTES = 4_000_000
+// Largest batch that waiting incremental batches merge into (estimated bytes).
+const MAX_MERGED_BATCH_BYTES = 2_000_000
 const UPLOAD_DROP_WARN_INTERVAL_MS = 5000
+const RETRY_BACKOFF_CAP_MS = 30_000
+// Browsers cap in-flight keepalive bodies at 64KB per page; stay under it.
+const KEEPALIVE_BUDGET_BYTES = 60_000
+// Bytes currently in flight on keepalive requests from this module.
+let keepaliveBytesInFlight = 0
 // rrweb EventType.FullSnapshot. We don't import rrweb's enum because rrweb is
 // dynamically imported (bundle hygiene), so we'd have to pay the load cost
 // just to reference a constant. Magic number matches estimateEventBytes above
@@ -286,15 +328,14 @@ const RRWEB_EVENT_TYPE_FULL_SNAPSHOT = 2
 // emitted immediately before every FullSnapshot. A snapshot-only session
 // needs it, otherwise the viewer has no page URL and no canvas size.
 const RRWEB_EVENT_TYPE_META = 4
-// Hard ceiling on the whole submit-time snapshot attach: load rrweb,
-// capture, create the session row, upload one chunk, finalise. Feedback
-// capture is the product; page context is a bonus. If the bonus is not
-// ready in this long we submit the feedback with nothing attached rather
-// than make the user wait.
-const SNAPSHOT_ATTACH_BUDGET_MS = 1500
-// Slice of that budget allowed for loading rrweb and getting the snapshot
-// event out of it, leaving the rest for the three network calls.
-const SNAPSHOT_CAPTURE_BUDGET_MS = 700
+// How long rrweb may take to load and emit the snapshot. Runs after the
+// feedback is sent and the success UI has painted, so nobody waits on it.
+const SNAPSHOT_CAPTURE_BUDGET_MS = 5000
+// Attempts for the snapshot chunk. Background work, so retries are free.
+const SNAPSHOT_CHUNK_MAX_ATTEMPTS = 3
+// The snapshot runs after the thank-you paint, so the widget (panel and backdrop live in its shadow root) and
+// the consent prompt are always left out. Live recordings keep the widget, since using it is part of the session.
+const SNAPSHOT_EXCLUDE_SELECTOR = '[data-usero-widget], [data-usero-session-context-consent]'
 // Minimum gap between back-to-back snapshot-isolation flushes. Snapshots
 // normally fire every checkoutEveryMs (default 60s), but rrweb can emit
 // additional ones on SPA route changes via checkoutEveryNms. Keeping this
@@ -302,16 +343,6 @@ const SNAPSHOT_CAPTURE_BUDGET_MS = 700
 // checkoutEveryMs ensures isolation still happens for back-to-back snapshots
 // while preventing pathological flush storms.
 const SNAPSHOT_ISOLATION_MIN_GAP_MS = 1500
-
-function uint8ToBase64(bytes: Uint8Array): string {
-	let binary = ''
-	const chunkSize = 0x8000
-	for (let i = 0; i < bytes.length; i += chunkSize) {
-		const slice = bytes.subarray(i, i + chunkSize)
-		binary += String.fromCharCode.apply(null, Array.from(slice))
-	}
-	return typeof btoa === 'function' ? btoa(binary) : ''
-}
 
 async function gzipBytes(input: string): Promise<Uint8Array> {
 	if (typeof CompressionStream === 'undefined') {
@@ -392,6 +423,11 @@ interface CreateSessionBody {
 	// The user was asked and said yes. Only meaningful alongside
 	// `snapshotOnly`; the server rejects an 'ask'-mode create without it.
 	consented?: boolean
+	// Feedback this snapshot belongs to. The server links it when it accepts
+	// the session, so the link never waits on the chunk upload.
+	feedbackId?: string
+	// The replayLinkToken from the feedback response; the server links only with it.
+	linkToken?: string
 }
 
 // Extra create-session fields for the submit-time snapshot path. Absent for
@@ -399,6 +435,8 @@ interface CreateSessionBody {
 interface SnapshotSessionFlags {
 	snapshotOnly: true
 	consented: boolean
+	feedbackId: string
+	linkToken: string
 }
 
 async function createSession(
@@ -429,11 +467,15 @@ async function createSession(
 		if (snapshotFlags) {
 			body.snapshotOnly = snapshotFlags.snapshotOnly
 			body.consented = snapshotFlags.consented
+			body.feedbackId = snapshotFlags.feedbackId
+			body.linkToken = snapshotFlags.linkToken
 		}
 		const res = await fetch(joinUrl(apiUrl, '/api/replay-sessions'), {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify(body),
+			// The snapshot create carries the feedback link, so it must survive a navigation.
+			keepalive: snapshotFlags !== undefined,
 		})
 		if (!res.ok) return null
 		const json = (await res.json()) as {
@@ -468,37 +510,37 @@ async function uploadChunk(
 	maxAttempts: number,
 	droppedBefore: number,
 ): Promise<ChunkUploadResult> {
+	// Metadata rides in the query and the body is text/plain, so this is a CORS simple request:
+	// no preflight round trip per chunk, and it stays valid inside keepalive on unload.
+	const params = new URLSearchParams({
+		clientId,
+		eventCount: String(eventCount),
+		durationMs: String(Math.max(0, Math.round(durationMs))),
+	})
+	// Chunks lost right before this one, so the viewer can mark the gap.
+	if (droppedBefore > 0) params.set('droppedBefore', String(droppedBefore))
 	const url = joinUrl(
 		apiUrl,
-		`/api/replay-sessions/${encodeURIComponent(sessionReplayId)}/chunks/${seq}`,
+		`/api/replay-sessions/${encodeURIComponent(sessionReplayId)}/chunks/${seq}?${params.toString()}`,
 	)
+	// Slice to a plain ArrayBuffer so the Blob part type-checks on every TS lib target.
+	const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
+	// A stalled connection must not hold the lane forever; allow ~10KB/s on top of a 30s floor.
+	const timeoutMs = 30_000 + Math.ceil(bytes.byteLength / 10)
+	let allowKeepalive = true
 	let attempt = 0
 	while (attempt < maxAttempts) {
+		// keepalive lets the request outlive a page hide or unload, within the browser's 64KB budget.
+		const keepalive = allowKeepalive && keepaliveBytesInFlight + bytes.byteLength <= KEEPALIVE_BUDGET_BYTES
+		if (keepalive) keepaliveBytesInFlight += bytes.byteLength
+		const controller = typeof AbortController === 'undefined' ? null : new AbortController()
+		const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null
 		try {
-			// Wrap in a Blob so the body type is unambiguously BodyInit; some
-			// TS lib targets reject raw Uint8Array as fetch body. Slice off
-			// the buffer to satisfy the BlobPart ArrayBuffer constraint
-			// (Uint8Array<SharedArrayBuffer> is the alternative the lib
-			// admits, which we never produce here).
-			const buffer = bytes.buffer.slice(
-				bytes.byteOffset,
-				bytes.byteOffset + bytes.byteLength,
-			) as ArrayBuffer
-			const blob = new Blob([buffer], { type: 'application/octet-stream' })
-			const headers: Record<string, string> = {
-				'Content-Type': 'application/octet-stream',
-				'X-Usero-Client-Id': clientId,
-				'X-Usero-Event-Count': String(eventCount),
-				'X-Usero-Duration-Ms': String(Math.max(0, Math.round(durationMs))),
-			}
-			// Signal a playback gap: how many chunks were dropped (queue
-			// saturation) between the previous successful upload and this one.
-			// Server-side viewer will use this to render a "missing data" marker.
-			if (droppedBefore > 0) headers['X-Usero-Dropped-Before'] = String(droppedBefore)
 			const res = await fetch(url, {
-				method: 'PUT',
-				body: blob,
-				headers,
+				method: 'POST',
+				body: new Blob([buffer], { type: 'text/plain' }),
+				keepalive,
+				signal: controller?.signal,
 			})
 			if (res.ok) return { ok: true, stopSession: false }
 			// 409: server told us to stop (bot-dropped, or session already
@@ -514,9 +556,15 @@ async function uploadChunk(
 			}
 		} catch (err) {
 			logger.warn(`chunk ${seq} attempt ${attempt + 1} failed`, err)
+			// A keepalive quota rejection (other keepalive traffic on the page) retries without it.
+			if (keepalive) allowKeepalive = false
+		} finally {
+			if (timer) clearTimeout(timer)
+			if (keepalive) keepaliveBytesInFlight -= bytes.byteLength
 		}
 		attempt += 1
-		const backoff = Math.min(15_000, 500 * 2 ** attempt) + Math.floor(Math.random() * 250)
+		if (attempt >= maxAttempts) break
+		const backoff = Math.min(RETRY_BACKOFF_CAP_MS, 500 * 2 ** attempt) + Math.floor(Math.random() * 250)
 		await new Promise(resolve => setTimeout(resolve, backoff))
 	}
 	logger.error(`chunk ${seq} dropped after ${maxAttempts} attempts`)
@@ -588,126 +636,234 @@ export function maybeIsolateSnapshot(
 	return { didIsolate: true }
 }
 
-function scheduleChunkUpload(store: ReplayStore, ctx: PluginContext): void {
-	if (!store.sessionReplayId) return
-	if (store.pendingEvents.length === 0) return
-	// Queue saturation. We bound memory by refusing to enqueue more work, but a
-	// snapshot-bearing buffer is the playback anchor and must NEVER be dropped:
-	// losing it makes every subsequent incremental unplayable. So we only drop
-	// NON-snapshot buffers here; a snapshot buffer falls through and is enqueued
-	// even past MAX_PENDING_UPLOADS (the queue is a serial promise chain, so this
-	// just means it waits its turn rather than racing memory up unboundedly).
-	if (store.pendingUploads >= MAX_PENDING_UPLOADS && !store.pendingHasSnapshot) {
-		const now = Date.now()
-		if (now - store.lastUploadDropWarnAt > UPLOAD_DROP_WARN_INTERVAL_MS) {
-			store.lastUploadDropWarnAt = now
-			ctx.logger.warn(
-				`upload queue full (${store.pendingUploads} in-flight), dropping non-snapshot chunk to bound memory`,
-			)
-		}
-		store.pendingEvents = []
-		store.pendingBytes = 0
-		store.pendingFirstTs = null
-		store.pendingLastTs = null
-		// Track for the next successful chunk so the viewer can render a gap.
-		store.droppedSinceLastUpload += 1
-		return
-	}
-	// Chunk boundary: re-resolve the user. Captures mid-session login on
-	// replay-only installs that never open the widget. No-op via fingerprint
-	// dedupe if nothing changed.
-	try {
-		ctx.resolveUser?.()
-	} catch (err) {
-		ctx.logger.warn('resolveUser threw at chunk boundary', err)
-	}
-	const events = store.pendingEvents
-	const eventCount = events.length
+function warnDrop(store: ReplayStore, ctx: PluginContext, message: string): void {
+	const now = Date.now()
+	if (now - store.lastUploadDropWarnAt <= UPLOAD_DROP_WARN_INTERVAL_MS) return
+	store.lastUploadDropWarnAt = now
+	ctx.logger.warn(message)
+}
+
+// Moves the pending buffer into the upload backlog. A waiting incremental batch absorbs the new
+// one, so a slow network yields bigger chunks, not drops. Snapshot batches never merge, which
+// keeps the playback anchor in its own small chunk.
+function enqueuePendingBatch(store: ReplayStore, ctx: PluginContext): void {
 	const firstTs = store.pendingFirstTs ?? 0
-	const lastTs = store.pendingLastTs ?? firstTs
-	const durationMs = Math.max(0, lastTs - firstTs)
-	const hasSnapshot = store.pendingHasSnapshot
-	const seq = store.nextChunkSeq
-	store.nextChunkSeq += 1
+	const batch: UploadBatch = {
+		events: store.pendingEvents,
+		estBytes: store.pendingBytes,
+		firstTs,
+		lastTs: store.pendingLastTs ?? firstTs,
+		hasSnapshot: store.pendingHasSnapshot,
+	}
 	store.pendingEvents = []
 	store.pendingBytes = 0
 	store.pendingFirstTs = null
 	store.pendingLastTs = null
 	store.pendingHasSnapshot = false
 
-	const sessionReplayId = store.sessionReplayId
-	const apiUrl = store.options.apiUrl
-	const clientId = store.clientId
-	const maxAttempts = store.options.chunkMaxAttempts
+	const last = store.uploadBacklog[store.uploadBacklog.length - 1]
+	if (
+		last &&
+		!last.hasSnapshot &&
+		!batch.hasSnapshot &&
+		last.estBytes + batch.estBytes <= MAX_MERGED_BATCH_BYTES
+	) {
+		for (const event of batch.events) last.events.push(event)
+		last.estBytes += batch.estBytes
+		last.lastTs = batch.lastTs
+	} else {
+		store.uploadBacklog.push(batch)
+	}
 
-	const droppedBefore = store.droppedSinceLastUpload
-	store.pendingUploads += 1
-	store.uploadQueue = store.uploadQueue.then(async () => {
-		try {
-			if (store.cancelled) return
-			const json = JSON.stringify(events)
-			const bytes = await gzipBytes(json)
-			if (bytes.byteLength > HARD_CHUNK_BYTE_CAP) {
-				// A snapshot chunk is the playback anchor: dropping it leaves
-				// every following incremental unplayable, which is exactly the
-				// "Meta + incrementals, no snapshot" ghost row we're fixing.
-				// Snapshot isolation already ships snapshots near-empty, so a
-				// >4MB gzipped snapshot is pathological; still, attempt the
-				// upload rather than discard the anchor. The server route caps
-				// at MAX_CHUNK_BYTES and will 413 if it truly can't take it, but
-				// we never voluntarily throw the anchor away.
-				if (hasSnapshot) {
-					ctx.logger.error(
-						`snapshot chunk ${seq} exceeds 4MB hard cap (${bytes.byteLength} bytes); uploading anyway to preserve the playback anchor`,
-					)
-				} else {
-					ctx.logger.error(
-						`chunk ${seq} exceeds 4MB hard cap (${bytes.byteLength} bytes), dropping`,
-					)
-					// Surface the drop on the next successful chunk so the viewer
-					// can render a gap marker. Without this, oversized chunks
-					// vanish without trace server-side.
-					store.droppedSinceLastUpload += 1
-					return
-				}
-			}
-			const result = await uploadChunk(
-				apiUrl,
-				sessionReplayId,
-				clientId,
-				seq,
-				bytes,
-				eventCount,
-				durationMs,
-				ctx.logger,
-				maxAttempts,
-				droppedBefore,
-			)
-			if (hasSnapshot && !result.ok) {
-				// We uploaded an oversized snapshot chunk anyway to preserve the
-				// anchor, but the upload still failed after retries. The anchor
-				// is lost, so record a gap for the viewer just like a real drop.
-				store.droppedSinceLastUpload += 1
-			}
-			if (result.ok && droppedBefore > 0) {
-				// Subtract what we just reported, rather than zeroing, so any
-				// drops that happened while this chunk was in flight still
-				// surface on the next successful upload.
-				store.droppedSinceLastUpload = Math.max(
-					0,
-					store.droppedSinceLastUpload - droppedBefore,
-				)
-			}
-			if (result.stopSession) {
-				store.stopped = true
-				stopRrweb(store)
-			}
-		} catch (err) {
-			ctx.logger.error(`chunk ${seq} encode failed`, err)
-		} finally {
-			store.pendingUploads -= 1
+	// Last resort under a long outage: drop the oldest waiting batches, never the newest snapshot.
+	let total = 0
+	for (const b of store.uploadBacklog) total += b.estBytes
+	let i = 0
+	while (total > MAX_BACKLOG_BYTES && i < store.uploadBacklog.length - 1) {
+		const candidate = store.uploadBacklog[i]
+		if (!candidate) break
+		const newerSnapshot = store.uploadBacklog.slice(i + 1).some(b => b.hasSnapshot)
+		if (candidate.hasSnapshot && !newerSnapshot) {
+			i += 1
+			continue
 		}
+		store.uploadBacklog.splice(i, 1)
+		total -= candidate.estBytes
+		store.droppedSinceLastUpload += 1
+		warnDrop(store, ctx, 'replay upload backlog over its memory cap, dropping the oldest waiting chunk')
+	}
+}
+
+// Fixes the next seq and starts encoding. Synchronous up to the gzip so seqs follow capture order
+// even when the unload flush seals concurrently.
+function sealBatch(store: ReplayStore, batch: UploadBatch, encode: (events: RrwebEvent[]) => Promise<Uint8Array>): SealedChunk {
+	const seq = store.nextChunkSeq
+	store.nextChunkSeq += 1
+	const droppedBefore = store.droppedSinceLastUpload
+	store.droppedSinceLastUpload = 0
+	return {
+		seq,
+		bytes: encode(batch.events),
+		eventCount: batch.events.length,
+		durationMs: Math.max(0, batch.lastTs - batch.firstTs),
+		hasSnapshot: batch.hasSnapshot,
+		droppedBefore,
+		unloadSend: null,
+	}
+}
+
+async function sendSealedChunk(store: ReplayStore, ctx: PluginContext, chunk: SealedChunk): Promise<ChunkUploadResult> {
+	const sessionReplayId = store.sessionReplayId
+	if (!sessionReplayId) return { ok: false, stopSession: false }
+	if (chunk.unloadSend && (await chunk.unloadSend)) return { ok: true, stopSession: false }
+	const bytes = await chunk.bytes
+	if (bytes.byteLength > HARD_CHUNK_BYTE_CAP) {
+		// Never voluntarily discard the playback anchor; the server 413s if it truly can't take it.
+		if (!chunk.hasSnapshot) {
+			ctx.logger.error(`chunk ${chunk.seq} exceeds 4MB hard cap (${bytes.byteLength} bytes), dropping`)
+			return { ok: false, stopSession: false }
+		}
+		ctx.logger.error(`snapshot chunk ${chunk.seq} exceeds 4MB hard cap (${bytes.byteLength} bytes); uploading anyway`)
+	}
+	return uploadChunk(
+		store.options.apiUrl,
+		sessionReplayId,
+		store.clientId,
+		chunk.seq,
+		bytes,
+		chunk.eventCount,
+		chunk.durationMs,
+		ctx.logger,
+		store.options.chunkMaxAttempts,
+		chunk.droppedBefore,
+	)
+}
+
+// One request at a time, oldest first. A failed chunk is counted and reported as a gap on the next.
+async function runUploadLane(store: ReplayStore, ctx: PluginContext): Promise<void> {
+	while (!store.cancelled) {
+		let next = store.sealedChunks.shift()
+		if (!next) {
+			const batch = store.uploadBacklog.shift()
+			if (!batch) return
+			next = sealBatch(store, batch, encodeChunk)
+		}
+		let result: ChunkUploadResult
+		try {
+			result = await sendSealedChunk(store, ctx, next)
+		} catch (err) {
+			ctx.logger.error(`chunk ${next.seq} encode failed`, err)
+			result = { ok: false, stopSession: false }
+		}
+		if (result.stopSession) {
+			store.stopped = true
+			stopRrweb(store)
+			store.uploadBacklog = []
+			store.sealedChunks = []
+			return
+		}
+		if (!result.ok) store.droppedSinceLastUpload += 1 + next.droppedBefore
+	}
+}
+
+function startUploadLane(store: ReplayStore, ctx: PluginContext): void {
+	if (store.uploadLaneRunning) return
+	store.uploadLaneRunning = true
+	store.uploadQueue = runUploadLane(store, ctx).finally(() => {
+		store.uploadLaneRunning = false
 	})
+}
+
+function scheduleChunkUpload(store: ReplayStore, ctx: PluginContext): void {
+	if (!store.sessionReplayId) return
+	if (store.pendingEvents.length === 0) return
+	// Chunk boundary: re-resolve the user, so a mid-session login on a replay-only install is
+	// picked up. Fingerprint dedupe makes this a no-op when nothing changed.
+	try {
+		ctx.resolveUser?.()
+	} catch (err) {
+		ctx.logger.warn('resolveUser threw at chunk boundary', err)
+	}
+	enqueuePendingBatch(store, ctx)
+	startUploadLane(store, ctx)
+}
+
+// Page hide, unload or teardown: seal everything still waiting and fire it now on keepalive
+// requests, instead of leaving it behind the lane where a frozen or closed page would lose it.
+// The lane still confirms each send and retries if the page survives.
+function flushForUnload(store: ReplayStore, ctx: PluginContext): void {
+	const sessionReplayId = store.sessionReplayId
+	if (!sessionReplayId) return
+	if (store.pendingEvents.length > 0) enqueuePendingBatch(store, ctx)
+	const batches = store.uploadBacklog
+	store.uploadBacklog = []
+	const events: RrwebEvent[] = []
+	for (const batch of batches) for (const event of batch.events) events.push(event)
+	if (events.length === 0) return
+
+	const fire = (chunk: SealedChunk, bytes: Uint8Array): Promise<boolean> =>
+		uploadChunk(
+			store.options.apiUrl,
+			sessionReplayId,
+			store.clientId,
+			chunk.seq,
+			bytes,
+			chunk.eventCount,
+			chunk.durationMs,
+			ctx.logger,
+			1,
+			chunk.droppedBefore,
+		).then(r => r.ok)
+
+	// Gzip is async and never completes in an unloading page, so the oldest events that fit the
+	// keepalive budget go out now as raw JSON, sent synchronously inside the pagehide handler.
+	const encoder = new TextEncoder()
+	let budget = KEEPALIVE_BUDGET_BYTES - keepaliveBytesInFlight - 2
+	let cut = 0
+	prefix: for (const batch of batches) {
+		// A snapshot batch never shares the prefix with its neighbours.
+		if (cut > 0 && batch.hasSnapshot) break
+		for (const event of batch.events) {
+			const size = encoder.encode(JSON.stringify(event)).byteLength + 1
+			if (size > budget) break prefix
+			budget -= size
+			cut += 1
+		}
+		if (batch.hasSnapshot) break
+	}
+	if (cut > 0) {
+		const rawBytes = encoder.encode(JSON.stringify(events.slice(0, cut)))
+		const raw = sealBatch(store, batchOf(events.slice(0, cut)), () => Promise.resolve(rawBytes))
+		raw.unloadSend = fire(raw, rawBytes)
+		store.sealedChunks.push(raw)
+	}
+	// The rest is best effort now (it lands when the page is only hidden), and the lane retries it. Each
+	// backlog batch stays its own chunk, so merged batches keep their size cap and snapshots stay isolated.
+	let offset = 0
+	for (const batch of batches) {
+		const skip = Math.max(0, cut - offset)
+		offset += batch.events.length
+		if (skip >= batch.events.length) continue
+		const chunk = sealBatch(store, batchOf(skip > 0 ? batch.events.slice(skip) : batch.events), encodeChunk)
+		chunk.unloadSend = chunk.bytes.then(bytes => fire(chunk, bytes), () => false)
+		store.sealedChunks.push(chunk)
+	}
+	startUploadLane(store, ctx)
+}
+
+function batchOf(events: RrwebEvent[]): UploadBatch {
+	const firstTs = events[0]?.timestamp ?? 0
+	return {
+		events,
+		estBytes: 0,
+		firstTs,
+		lastTs: events[events.length - 1]?.timestamp ?? firstTs,
+		hasSnapshot: events.some(e => e.type === RRWEB_EVENT_TYPE_FULL_SNAPSHOT),
+	}
+}
+
+function encodeChunk(events: RrwebEvent[]): Promise<Uint8Array> {
+	return gzipBytes(JSON.stringify(events))
 }
 
 function flushPendingChunk(store: ReplayStore, ctx: PluginContext): void {
@@ -955,7 +1111,8 @@ async function postFinalise(
 
 function finalise(store: ReplayStore, ctx: PluginContext, opts: { useBeacon: boolean }): void {
 	if (!store.sessionReplayId) return
-	if (store.pendingEvents.length > 0) flushPendingChunk(store, ctx)
+	// Chunks go out before the finalise beacon; the server accepts stragglers for a grace window.
+	flushForUnload(store, ctx)
 	const sessionReplayId = store.sessionReplayId
 	if (opts.useBeacon && typeof navigator !== 'undefined' && navigator.sendBeacon) {
 		const url = joinUrl(
@@ -964,7 +1121,8 @@ function finalise(store: ReplayStore, ctx: PluginContext, opts: { useBeacon: boo
 		)
 		const body = JSON.stringify({ clientId: store.clientId, endedAt: new Date().toISOString() })
 		try {
-			const blob = new Blob([body], { type: 'application/json' })
+			// text/plain keeps the beacon CORS-safelisted; Chrome refuses a cross-origin JSON beacon.
+			const blob = new Blob([body], { type: 'text/plain' })
 			navigator.sendBeacon(url, blob)
 			return
 		} catch (err) {
@@ -997,6 +1155,44 @@ interface SnapshotMaskingOptions {
 	blockSelector: string
 }
 
+// Resolves after the browser has painted and then gone idle, so background
+// work never delays a frame the user is waiting on (the success state).
+function afterNextPaint(): Promise<void> {
+	return new Promise<void>(resolve => {
+		const whenIdle = (): void => {
+			if (typeof requestIdleCallback === 'function') {
+				requestIdleCallback(() => resolve(), { timeout: 2000 })
+			} else {
+				setTimeout(resolve, 0)
+			}
+		}
+		if (typeof requestAnimationFrame === 'function') {
+			requestAnimationFrame(() => setTimeout(whenIdle, 0))
+		} else {
+			whenIdle()
+		}
+	})
+}
+
+function isPanelOpenEvent(event: Event): boolean {
+	if (typeof CustomEvent === 'undefined' || !(event instanceof CustomEvent)) return false
+	const detail: unknown = event.detail
+	return typeof detail === 'object' && detail !== null && 'reason' in detail && detail.reason === 'panel-open'
+}
+
+// User Timing entries the perf harness reads (`npm run perf`). Never throws.
+function markDuration(name: string, startMs: number): void {
+	try {
+		performance.measure(name, { start: startMs, end: performance.now() })
+	} catch {
+		// No User Timing L3 support; timing is diagnostics only.
+	}
+}
+
+function nowMs(): number {
+	return typeof performance !== 'undefined' ? performance.now() : Date.now()
+}
+
 // Starts rrweb, keeps only the Meta + FullSnapshot events, and stops it
 // again as soon as the snapshot lands. Returns null if rrweb will not load,
 // record() throws, or no snapshot arrives inside `budgetMs`.
@@ -1005,7 +1201,10 @@ export async function captureSnapshotEvents(
 	logger: PluginLogger,
 	budgetMs: number,
 ): Promise<RrwebEvent[] | null> {
+	const loadStart = nowMs()
 	const record = await loadRrwebRecord()
+	markDuration('usero:snapshot-load', loadStart)
+	const serialiseStart = nowMs()
 	if (!record) {
 		logger.warn('rrweb failed to load, page snapshot skipped')
 		return null
@@ -1033,6 +1232,7 @@ export async function captureSnapshotEvents(
 		const finish = (value: RrwebEvent[] | null): void => {
 			if (settled) return
 			settled = true
+			markDuration('usero:snapshot-serialise', serialiseStart)
 			if (timer !== null) clearTimeout(timer)
 			stopRecorder()
 			resolve(value)
@@ -1063,7 +1263,9 @@ export async function captureSnapshotEvents(
 				maskAllInputs: masking.maskAllInputs,
 				maskTextSelector: masking.maskTextSelector || undefined,
 				inlineStylesheet: masking.inlineStylesheet,
-				blockSelector: masking.blockSelector,
+				blockSelector: masking.blockSelector
+					? `${masking.blockSelector}, ${SNAPSHOT_EXCLUDE_SELECTOR}`
+					: SNAPSHOT_EXCLUDE_SELECTOR,
 				errorHandler: (error: unknown): boolean => {
 					logger.warn('rrweb emit error swallowed during page snapshot', error)
 					return true
@@ -1090,13 +1292,15 @@ interface SnapshotUploadParams {
 	// include. Forwarded verbatim; the server refuses an 'ask'-mode create
 	// without it.
 	consented: boolean
+	feedbackId: string
+	linkToken: string
 	logger: PluginLogger
 }
 
-// Ships a captured snapshot as a snapshot-only session: create, one chunk
-// at seq 0, finalise. Returns the sessionReplayId, or null if the server
-// declined the session or the chunk failed to land (an empty session row
-// is worse than no link, so we do not attach one).
+// Ships a captured snapshot as a snapshot-only session: create (which also
+// links it to the feedback server-side), one chunk at seq 0, finalise.
+// Returns the sessionReplayId, or null if the server declined the session
+// or the chunk failed to land.
 async function uploadSnapshotSession(params: SnapshotUploadParams): Promise<string | null> {
 	const { apiUrl, clientId, events, logger } = params
 	const created = await createSession(
@@ -1105,7 +1309,7 @@ async function uploadSnapshotSession(params: SnapshotUploadParams): Promise<stri
 		params.sdkSessionId,
 		params.anonymousId,
 		params.environment,
-		{ snapshotOnly: true, consented: params.consented },
+		{ snapshotOnly: true, consented: params.consented, feedbackId: params.feedbackId, linkToken: params.linkToken },
 	)
 	if (!created) {
 		logger.warn('snapshot session create failed')
@@ -1123,8 +1327,6 @@ async function uploadSnapshotSession(params: SnapshotUploadParams): Promise<stri
 	const bytes = await gzipBytes(JSON.stringify(events))
 	const firstTs = events[0]?.timestamp ?? 0
 	const lastTs = events[events.length - 1]?.timestamp ?? firstTs
-	// One attempt only: the caller is holding a feedback submit open, so a
-	// retry with backoff would blow the budget and get discarded anyway.
 	const result = await uploadChunk(
 		apiUrl,
 		sessionReplayId,
@@ -1134,11 +1336,11 @@ async function uploadSnapshotSession(params: SnapshotUploadParams): Promise<stri
 		events.length,
 		Math.max(0, lastTs - firstTs),
 		logger,
-		1,
+		SNAPSHOT_CHUNK_MAX_ATTEMPTS,
 		0,
 	)
 	if (!result.ok) {
-		logger.warn('snapshot chunk upload failed; not attaching the session')
+		logger.warn('snapshot chunk upload failed')
 		return null
 	}
 	await postFinalise(apiUrl, clientId, sessionReplayId, logger)
@@ -1311,59 +1513,73 @@ export function sessionReplay(options: SessionReplayOptions = {}): SessionReplay
 		return modePromise
 	}
 
-	// Captures the page and ships it as a snapshot-only session, bounded by
-	// SNAPSHOT_ATTACH_BUDGET_MS end to end. Returns the submission patch, or
-	// undefined if anything failed or ran long, in which case the feedback
-	// submits with no page context attached.
-	//
-	// `consented` is only ever true on the 'ask' path, and this function is
-	// only reached there AFTER the user said yes, so a decline means no
+	// Submit-time page snapshot, run entirely after the feedback POST: wait
+	// for the feedback id (so the success UI has rendered), let the browser
+	// paint, ask in 'ask' mode, then capture and ship a snapshot-only session
+	// that the server links to the feedback on create. A decline means no
 	// capture ever happens rather than a capture we throw away.
-	const attachPageSnapshot = async (
+	const snapshotAfterSubmit = async (
 		ctx: PluginContext,
-		apiUrl: string,
-		consented: boolean,
-	): Promise<{ sessionReplayId: string; replayOffsetMs: number } | undefined> => {
-		const work = (async (): Promise<string | null> => {
-			const events = await captureSnapshotEvents(
-				{
-					maskAllInputs: merged.maskAllInputs,
-					maskTextSelector: merged.maskTextSelector,
-					inlineStylesheet: merged.inlineStylesheet,
-					blockSelector: merged.blockSelector,
-				},
-				ctx.logger,
-				SNAPSHOT_CAPTURE_BUDGET_MS,
-			)
-			if (!events || events.length === 0) return null
-			return uploadSnapshotSession({
-				apiUrl,
-				clientId: ctx.clientId,
-				sdkSessionId: ctx.getSdkSessionId ? ctx.getSdkSessionId() : mintSdkSessionId(),
-				anonymousId: ctx.getAnonymousId ? ctx.getAnonymousId() : getOrMintAnonymousId(),
-				environment: standaloneEnvironment ?? ctx.environment,
-				events,
-				consented,
-				logger: ctx.logger,
-			})
-		})()
-		// Whichever finishes first wins. If the budget wins, any in-flight
-		// upload is simply not awaited: the session still lands server-side
-		// but this submission goes out without it.
-		const timeout = new Promise<null>(resolve => {
-			setTimeout(() => resolve(null), SNAPSHOT_ATTACH_BUDGET_MS)
-		})
-		const sessionReplayId = await Promise.race([
-			work.catch(err => {
-				ctx.logger.warn('page snapshot attach failed', err)
-				return null
-			}),
-			timeout,
+		outcome: FeedbackSubmitOutcome,
+	): Promise<void> => {
+		const apiUrl = merged.apiUrl || ctx.baseUrl || DEFAULT_API_URL
+		const [feedbackId, linkToken, mode] = await Promise.all([
+			outcome.feedbackId,
+			outcome.replayLinkToken,
+			resolveSessionContextMode(apiUrl, ctx.clientId),
 		])
-		if (!sessionReplayId) return undefined
-		// A snapshot is a single frame taken at the moment of submit, so
-		// the feedback sits at the very start of it.
-		return { sessionReplayId, replayOffsetMs: 0 }
+		// No token, no link: skip the capture rather than upload a snapshot nobody can see.
+		if (!feedbackId || !linkToken || mode === 'never') return
+		await afterNextPaint()
+		const consented =
+			mode === 'ask' ? await requestSessionContextConsent({ logger: ctx.logger }) : false
+		if (mode === 'ask') {
+			if (!consented) return
+			await afterNextPaint()
+		}
+		const events = await captureSnapshotEvents(
+			{
+				maskAllInputs: merged.maskAllInputs,
+				maskTextSelector: merged.maskTextSelector,
+				inlineStylesheet: merged.inlineStylesheet,
+				blockSelector: merged.blockSelector,
+			},
+			ctx.logger,
+			SNAPSHOT_CAPTURE_BUDGET_MS,
+		)
+		if (!events || events.length === 0) return
+		await uploadSnapshotSession({
+			apiUrl,
+			clientId: ctx.clientId,
+			sdkSessionId: ctx.getSdkSessionId ? ctx.getSdkSessionId() : mintSdkSessionId(),
+			anonymousId: ctx.getAnonymousId ? ctx.getAnonymousId() : getOrMintAnonymousId(),
+			environment: standaloneEnvironment ?? ctx.environment,
+			events,
+			consented,
+			feedbackId,
+			linkToken,
+			logger: ctx.logger,
+		})
+	}
+
+	// Warm rrweb when the feedback panel opens so the snapshot never pays
+	// for the chunk download, unless the project records nothing.
+	let panelOpenHandler: ((event: Event) => void) | null = null
+	const watchPanelOpen = (ctx: PluginContext): void => {
+		if (panelOpenHandler || typeof window === 'undefined') return
+		const apiUrl = merged.apiUrl || ctx.baseUrl || DEFAULT_API_URL
+		panelOpenHandler = (event: Event): void => {
+			if (!isPanelOpenEvent(event)) return
+			void resolveSessionContextMode(apiUrl, ctx.clientId).then(mode => {
+				if (mode !== 'never') void loadRrwebRecord()
+			})
+		}
+		window.addEventListener('usero:shadow-update', panelOpenHandler)
+	}
+	const unwatchPanelOpen = (): void => {
+		if (!panelOpenHandler) return
+		window.removeEventListener('usero:shadow-update', panelOpenHandler)
+		panelOpenHandler = null
 	}
 
 	const removeListeners = (store: ReplayStore): void => {
@@ -1437,8 +1653,10 @@ export function sessionReplay(options: SessionReplayOptions = {}): SessionReplay
 				droppedSinceLastUpload: 0,
 				lastSnapshotFlushAt: 0,
 				nextChunkSeq: 0,
+				uploadBacklog: [],
+				sealedChunks: [],
 				uploadQueue: Promise.resolve(),
-				pendingUploads: 0,
+				uploadLaneRunning: false,
 				chunkFlushTimer: null,
 				startTimer: null,
 				pageHideHandler: null,
@@ -1577,6 +1795,7 @@ export function sessionReplay(options: SessionReplayOptions = {}): SessionReplay
 		name: 'session-replay',
 		onInit(ctx) {
 			if (typeof window === 'undefined') return
+			watchPanelOpen(ctx)
 			if (phase === 'running' && currentStore && !currentStore.stopped && !currentStore.cancelled) {
 				// This same instance is already recording (started standalone
 				// before the widget mounted). Adopt instead of restarting:
@@ -1606,7 +1825,9 @@ export function sessionReplay(options: SessionReplayOptions = {}): SessionReplay
 			startedAs = 'plugin'
 			startWithContext(ctx)
 		},
-		async onFeedbackSubmit(ctx) {
+		// Synchronous on purpose: this runs before the feedback POST, so it
+		// only reads the live recording from memory and never awaits.
+		onFeedbackSubmit(ctx) {
 			// Fall back to the page-wide live recording when this ctx has no
 			// store of its own (widget mounted while another instance's
 			// standalone recording was running), so feedback still deep-links.
@@ -1618,25 +1839,20 @@ export function sessionReplay(options: SessionReplayOptions = {}): SessionReplay
 						: 0
 				return { sessionReplayId: store.sessionReplayId, replayOffsetMs: offsetMs }
 			}
-
-			// No live recording: sampled out, bot-gated, never started, or
-			// 'ask' mode where we deliberately never recorded. What we do
-			// next is entirely the client's session-context mode.
-			if (typeof window === 'undefined') return undefined
-			const apiUrl = merged.apiUrl || ctx.baseUrl || DEFAULT_API_URL
-			const mode = await resolveSessionContextMode(apiUrl, ctx.clientId)
-			if (mode === 'never') return undefined
-			if (mode === 'ask') {
-				// Ask BEFORE capturing. A decline means the snapshot is never
-				// taken, so there is no copy of it anywhere to discard, and
-				// nothing about this page ever reaches the network.
-				const consented = await requestSessionContextConsent({ logger: ctx.logger })
-				if (!consented) return undefined
-				return attachPageSnapshot(ctx, apiUrl, true)
-			}
-			return attachPageSnapshot(ctx, apiUrl, false)
+			return undefined
+		},
+		// No live recording went out with the feedback (sampled out,
+		// bot-gated, not started yet, or 'ask' mode): snapshot in the
+		// background, per the client's session-context mode.
+		afterFeedbackSubmit(ctx, outcome) {
+			if (typeof window === 'undefined') return
+			if (outcome.submission.sessionReplayId) return
+			void snapshotAfterSubmit(ctx, outcome).catch((err: unknown) => {
+				ctx.logger.warn('page snapshot failed', err)
+			})
 		},
 		onDestroy(ctx) {
+			unwatchPanelOpen()
 			if (delegatedToGlobal) {
 				// We only lent our resolveUser to someone else's recording.
 				// Detach it; the recording itself is not ours to stop.
@@ -1746,9 +1962,8 @@ export function getCurrentSession(ctx: PluginContext): CurrentSessionHandle | nu
 	return { id: store.sessionReplayId, offsetMs }
 }
 
-// Internal helper exports for testing only. Not part of the public API.
+// Test seams. The published entries (src/replay-entry.ts) leave this out; tests import it from dist-test/.
 export const __test__ = {
-	uint8ToBase64,
 	gzipBytes,
 	mintSdkSessionId,
 	uploadChunk,
@@ -1763,7 +1978,9 @@ export const __test__ = {
 	SNAPSHOT_ISOLATION_MIN_GAP_MS,
 	HARD_CHUNK_BYTE_CAP,
 	SDK_SESSION_STORAGE_KEY,
-	MAX_PENDING_UPLOADS,
+	MAX_BACKLOG_BYTES,
+	MAX_MERGED_BATCH_BYTES,
+	flushForUnload,
 	UPLOAD_DROP_WARN_INTERVAL_MS,
 	DEFAULTS,
 	readGlobalSlot,
@@ -1771,7 +1988,7 @@ export const __test__ = {
 	uploadSnapshotSession,
 	postFinalise,
 	RRWEB_EVENT_TYPE_META,
-	SNAPSHOT_ATTACH_BUDGET_MS,
+	SNAPSHOT_CHUNK_MAX_ATTEMPTS,
 	SNAPSHOT_CAPTURE_BUDGET_MS,
 	// rrweb needs a real DOM, so the node suite swaps in a fake recorder to
 	// exercise the snapshot path. Pass null to restore the real loader.

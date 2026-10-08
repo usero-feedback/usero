@@ -28,8 +28,9 @@ We've previously over-bumped (e.g. v0.4.0 for the declarative identify API, whic
 Publishing happens in the PUBLIC repo's `.github/workflows/publish.yml`, which triggers on a push to its `main` touching `package.json` and runs `npm publish --access public --provenance` via npm Trusted Publishing (OIDC). There is no `NPM_TOKEN` anywhere; provenance requires the public repo, which is why publishing stays there. **You do not need to `npm publish` locally**, and the local user is not authenticated to the `@usero` scope.
 
 1. In `feedback/widget/`: bump `version` in `package.json` (patch by default).
-2. Prepend a one-paragraph entry to `CHANGELOG.md`.
-3. `npm run typecheck` and `npm run build`.
+2. `npm run typecheck`, `npm run build` and `npm run perf` (must pass its budgets, see `docs/PERFORMANCE.md`).
+3. Prepend a one-paragraph entry to `CHANGELOG.md`, followed by the `npm run perf` medians table from step 2 (click to feedback
+   sent, click to success, replay linked, per mode), so every release records its submit speed.
 4. Commit `Release: @usero/sdk v<version>` (stage `widget/package.json`, `widget/package-lock.json`, `widget/CHANGELOG.md` explicitly by path; no `git add -A`).
 5. Push the feedback repo's `main`. The mirror workflow pushes the source to the public repo, whose publish workflow sees the `package.json` change and publishes. Its "already published?" guard makes no-version-change mirror pushes a no-op.
 6. The mirror workflow pushes the `v<version>` tag automatically when the version changed (this is what fires the WordPress release workflow). No manual tagging.
@@ -68,6 +69,9 @@ The legacy `react-feedback-collector` package is consumed by a separate set of r
 
 - Strict TypeScript. No `any`. No `as Type` shortcuts that bypass validation.
 - No emdashes anywhere in code, comments, commits, or CHANGELOG. Use commas, periods, or restructure.
+- Submit critical path: zero awaited requests or capture before the feedback POST, success UI never blocked; gzipped bundle
+  budgets live in `scripts/verify-dist.mjs`. Run `npm run perf` before any change touching submit, replay or bundle size, and
+  before every release. Raising any budget needs Will's OK. Details: `docs/PERFORMANCE.md`.
 - The SDK runs in customer production browsers. Treat the replay plugin as a hot path: no localStorage on every event, no per-render network, no JSON.stringify in tight loops.
 - Storage failures (localStorage throwing in sandboxed iframes, Safari Lockdown, quota exceeded) must NEVER break replay capture. Wrap in try/catch with in-memory fallback. See `src/identity.ts` for the working pattern.
 - Identity is monotonic: traits/email/displayName can only be added or replaced by a new identify call, never cleared. Logout (`user={null}`) rotates the anonymousId rather than nulling the existing person link.

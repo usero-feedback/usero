@@ -68,7 +68,7 @@ export default defineConfig([
 	// splitting; shared code inlines into each .cjs file).
 	{
 		entry: {
-			replay: 'src/replay.ts',
+			replay: 'src/replay-entry.ts',
 			'plugins/session-replay': 'src/plugins/session-replay.ts',
 			'replay/react': 'src/replay-react.tsx',
 		},

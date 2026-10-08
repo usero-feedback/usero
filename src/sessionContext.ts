@@ -8,8 +8,8 @@
 //   'always' - record ambiently, as the SDK has always done. If no
 //              recording is live at submit time, capture a single page
 //              snapshot instead so the feedback still has context.
-//   'ask'    - never record ambiently. At submit time, ask the user
-//              BEFORE anything is captured or sent. Decline means the
+//   'ask'    - never record ambiently. Once the feedback is sent, ask
+//              the user BEFORE anything is captured. Decline means the
 //              snapshot is never taken, so there is nothing to discard.
 //   'never'  - capture nothing, ever. Replay never bootstraps and rrweb
 //              is never loaded.
@@ -34,10 +34,10 @@ export type SessionContextMode = 'always' | 'ask' | 'never'
 export const DEFAULT_SESSION_CONTEXT_MODE: SessionContextMode = 'always'
 
 // ALL user-facing consent wording lives here, in one place, so it can be
-// changed without touching any logic. Keep it to one plain sentence and
-// two unambiguous choices.
+// changed without touching any logic. The prompt shows after the feedback
+// has sent, so it reads as an optional extra, with two unambiguous choices.
 export const SESSION_CONTEXT_CONSENT_COPY = {
-	question: 'Include a snapshot of this page so we can see what you saw?',
+	question: "Thanks, it's sent! Want to include a snapshot of this page too?",
 	includeLabel: 'Include',
 	declineLabel: "Don't include",
 	// Screen-reader label for the prompt as a whole.
@@ -46,7 +46,7 @@ export const SESSION_CONTEXT_CONSENT_COPY = {
 
 // How long the prompt waits for a choice before treating silence as a
 // decline. Long enough to read one sentence and click, short enough that a
-// user who walked away is not left with a stuck submit.
+// user who walked away is not left with the prompt on screen.
 export const SESSION_CONTEXT_CONSENT_TIMEOUT_MS = 15_000
 
 // Budget for the config fetch. It runs at init, off the critical path, but

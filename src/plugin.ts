@@ -14,8 +14,10 @@
 //      the outgoing payload. Top-level keys are shallow-merged (later
 //      plugins win wholesale); `metadata` is deep-merged one level so two
 //      plugins can both contribute keys without clobbering each other.
-//      Plugins MUST return quickly (a few hundred ms at most) or risk users
-//      abandoning the submit.
+//      It sits on the submit critical path: return synchronously from
+//      in-memory state, never await a network request or a capture.
+//      Slow work goes in `afterFeedbackSubmit`, which runs once the POST
+//      is on the wire and is never awaited.
 //   4. Plugin errors are caught and logged; they never block a submission.
 
 import type { FeedbackSubmission } from './types'
@@ -98,7 +100,18 @@ export interface UseroPlugin {
 		ctx: PluginContext,
 		submission: FeedbackSubmission,
 	) => Promise<Partial<FeedbackSubmission> | undefined> | Partial<FeedbackSubmission> | undefined
+	// Fire-and-forget, called right after the feedback POST is dispatched.
+	// `feedbackId` resolves with the created id, or null if the submit failed.
+	afterFeedbackSubmit?: (ctx: PluginContext, outcome: FeedbackSubmitOutcome) => void
 	onDestroy?: (ctx: PluginContext) => void
+}
+
+export interface FeedbackSubmitOutcome {
+	// The payload exactly as sent, after every onFeedbackSubmit patch.
+	submission: FeedbackSubmission
+	feedbackId: Promise<string | null>
+	// Proves this browser sent the feedback; a snapshot create must carry it to link. Null on older servers.
+	replayLinkToken: Promise<string | null>
 }
 
 export function createPluginLogger(name: string): PluginLogger {

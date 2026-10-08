@@ -9,10 +9,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { __test__ } from '../dist/plugins/session-replay.js'
+import { __test__ } from '../dist-test/replay.js'
 
 const {
-	uint8ToBase64,
 	gzipBytes,
 	joinUrl,
 	uploadChunk,
@@ -26,7 +25,6 @@ const {
 	SNAPSHOT_ISOLATION_MIN_GAP_MS,
 	HARD_CHUNK_BYTE_CAP,
 	SDK_SESSION_STORAGE_KEY,
-	MAX_PENDING_UPLOADS,
 	DEFAULTS,
 } = __test__
 
@@ -36,12 +34,6 @@ const silentLogger = {
 	warn: () => {},
 	error: () => {},
 }
-
-test('uint8ToBase64 round-trips through atob', () => {
-	const bytes = new Uint8Array([72, 101, 108, 108, 111]) // "Hello"
-	const encoded = uint8ToBase64(bytes)
-	assert.equal(encoded, 'SGVsbG8=')
-})
 
 test('gzipBytes produces gzip magic bytes (1f 8b)', async () => {
 	const input = JSON.stringify({ events: Array.from({ length: 50 }, (_, i) => ({ i })) })
@@ -73,7 +65,7 @@ test('SDK_SESSION_STORAGE_KEY is namespaced', () => {
 })
 
 // uploadChunk: success on first try
-test('uploadChunk: succeeds on first attempt and sends the right headers', async () => {
+test('uploadChunk: succeeds on first attempt as a preflight-free simple request', async () => {
 	const calls = []
 	globalThis.fetch = async (url, init) => {
 		calls.push({ url, init })
@@ -94,21 +86,21 @@ test('uploadChunk: succeeds on first attempt and sends the right headers', async
 	assert.equal(result.ok, true)
 	assert.equal(result.stopSession, false)
 	assert.equal(calls.length, 1)
-	assert.equal(calls[0].url, 'https://api.example.com/api/replay-sessions/sess-1/chunks/3')
-	assert.equal(calls[0].init.method, 'PUT')
-	assert.equal(calls[0].init.headers['Content-Type'], 'application/octet-stream')
-	assert.equal(calls[0].init.headers['X-Usero-Client-Id'], 'client-x')
-	assert.equal(calls[0].init.headers['X-Usero-Event-Count'], '7')
-	assert.equal(calls[0].init.headers['X-Usero-Duration-Ms'], '2500')
-	assert.equal(
-		calls[0].init.headers['X-Usero-Dropped-Before'],
-		undefined,
-		'no dropped-before header when count is 0',
-	)
+	const url = new URL(calls[0].url)
+	assert.equal(url.origin + url.pathname, 'https://api.example.com/api/replay-sessions/sess-1/chunks/3')
+	assert.equal(url.searchParams.get('clientId'), 'client-x')
+	assert.equal(url.searchParams.get('eventCount'), '7')
+	assert.equal(url.searchParams.get('durationMs'), '2500')
+	assert.equal(url.searchParams.get('droppedBefore'), null, 'no droppedBefore when count is 0')
+	// CORS simple request: POST, safelisted content type, no custom headers, so no preflight.
+	assert.equal(calls[0].init.method, 'POST')
+	assert.equal(calls[0].init.headers, undefined)
+	assert.equal(calls[0].init.body.type, 'text/plain')
+	assert.equal(calls[0].init.keepalive, true, 'small chunks survive a page hide')
 })
 
 // uploadChunk: sends X-Usero-Dropped-Before when chunks were dropped
-test('uploadChunk: includes X-Usero-Dropped-Before header when droppedBefore > 0', async () => {
+test('uploadChunk: includes droppedBefore when droppedBefore > 0', async () => {
 	const calls = []
 	globalThis.fetch = async (url, init) => {
 		calls.push({ url, init })
@@ -126,7 +118,17 @@ test('uploadChunk: includes X-Usero-Dropped-Before header when droppedBefore > 0
 		5,
 		2,
 	)
-	assert.equal(calls[0].init.headers['X-Usero-Dropped-Before'], '2')
+	assert.equal(new URL(calls[0].url).searchParams.get('droppedBefore'), '2')
+})
+
+test('uploadChunk: a large chunk skips keepalive, which caps in-flight bodies at 64KB', async () => {
+	const calls = []
+	globalThis.fetch = async (url, init) => {
+		calls.push({ url, init })
+		return new Response('{"ok":true}', { status: 200 })
+	}
+	await uploadChunk('https://api.example.com', 'sess-1', 'client-x', 0, new Uint8Array(70_000), 1, 0, silentLogger, 5, 0)
+	assert.equal(calls[0].init.keepalive, false)
 })
 
 // uploadChunk: 409 stops the session immediately
@@ -307,8 +309,10 @@ function makeStore(overrides = {}) {
 		droppedSinceLastUpload: 0,
 		lastSnapshotFlushAt: 0,
 		nextChunkSeq: 0,
+		uploadBacklog: [],
+		sealedChunks: [],
 		uploadQueue: Promise.resolve(),
-		pendingUploads: 0,
+		uploadLaneRunning: false,
 		chunkFlushTimer: null,
 		startTimer: null,
 		pageHideHandler: null,
@@ -343,62 +347,9 @@ function makeCtx() {
 	}
 }
 
-// uploadQueue depth cap: schedule drops chunks once MAX_PENDING_UPLOADS in flight
-test('scheduleChunkUpload: drops chunk when uploadQueue is saturated', () => {
-	const store = makeStore({
-		pendingEvents: [{ type: 0, data: {}, timestamp: 1 }],
-		pendingBytes: 10,
-		pendingFirstTs: 1,
-		pendingLastTs: 1,
-		pendingUploads: MAX_PENDING_UPLOADS,
-	})
-	const { ctx, warnings } = makeCtx()
-	scheduleChunkUpload(store, ctx)
-	// Drop path: buffer is cleared, no new upload queued, no seq increment.
-	assert.equal(store.pendingEvents.length, 0)
-	assert.equal(store.pendingBytes, 0)
-	assert.equal(store.nextChunkSeq, 0)
-	assert.equal(store.pendingUploads, MAX_PENDING_UPLOADS)
-	assert.equal(warnings.length, 1, 'should warn on drop')
-	assert.match(warnings[0][0], /upload queue full/)
-})
+// Backlog merging, the memory cap and unload flushing live in replay-upload-lane.test.mjs.
 
-// uploadQueue depth cap: warning is rate-limited
-test('scheduleChunkUpload: drop warning is rate-limited within the window', () => {
-	const store = makeStore({
-		pendingEvents: [{ type: 0, data: {}, timestamp: 1 }],
-		pendingBytes: 10,
-		pendingFirstTs: 1,
-		pendingLastTs: 1,
-		pendingUploads: MAX_PENDING_UPLOADS,
-		lastUploadDropWarnAt: Date.now(),
-	})
-	const { ctx, warnings } = makeCtx()
-	scheduleChunkUpload(store, ctx)
-	assert.equal(warnings.length, 0, 'recent warn should suppress repeat')
-})
-
-// drop counter: increments on saturation drop, decrements after successful upload
-test('scheduleChunkUpload: increments droppedSinceLastUpload on saturation drop', () => {
-	const store = makeStore({
-		pendingEvents: [{ type: 0, data: {}, timestamp: 1 }],
-		pendingBytes: 10,
-		pendingFirstTs: 1,
-		pendingLastTs: 1,
-		pendingUploads: MAX_PENDING_UPLOADS,
-	})
-	const { ctx } = makeCtx()
-	scheduleChunkUpload(store, ctx)
-	// Buffer was cleared by the drop path; re-prime before the next attempt.
-	store.pendingEvents = [{ type: 0, data: {}, timestamp: 2 }]
-	store.pendingBytes = 10
-	store.pendingFirstTs = 2
-	store.pendingLastTs = 2
-	scheduleChunkUpload(store, ctx)
-	assert.equal(store.droppedSinceLastUpload, 2)
-})
-
-test('scheduleChunkUpload: successful upload clears droppedSinceLastUpload and sends header', async () => {
+test('scheduleChunkUpload: successful upload clears droppedSinceLastUpload and reports the gap', async () => {
 	const calls = []
 	globalThis.fetch = async (url, init) => {
 		calls.push({ url, init })
@@ -415,7 +366,7 @@ test('scheduleChunkUpload: successful upload clears droppedSinceLastUpload and s
 	scheduleChunkUpload(store, ctx)
 	await store.uploadQueue
 	assert.equal(store.droppedSinceLastUpload, 0)
-	assert.equal(calls[0].init.headers['X-Usero-Dropped-Before'], '3')
+	assert.equal(new URL(calls[0].url).searchParams.get('droppedBefore'), '3')
 })
 
 // ---- maybeIsolateSnapshot ----
@@ -574,7 +525,8 @@ test('scheduleChunkUpload: resets pendingBytes after handoff', async () => {
 	assert.equal(store.pendingLastTs, null)
 	assert.equal(store.nextChunkSeq, 1)
 	await store.uploadQueue
-	assert.equal(store.pendingUploads, 0)
+	assert.equal(store.uploadLaneRunning, false)
+	assert.equal(store.uploadBacklog.length, 0)
 })
 
 // ---- SPA URL-change capture ----

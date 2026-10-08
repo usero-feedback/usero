@@ -5,4 +5,4 @@
 // working unchanged; both paths resolve to the same module (shared chunk in
 // the ESM build), so plugin state, the page-wide recording slot, and types
 // are identical whichever path you import.
-export * from '../replay'
+export * from '../replay-entry'

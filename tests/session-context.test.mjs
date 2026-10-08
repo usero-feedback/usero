@@ -156,7 +156,7 @@ globalThis.fetch = async (url, init = {}) => {
 	return new Response('{}', { status: 200 })
 }
 
-const { sessionReplay, __test__ } = await import('../dist/replay.js')
+const { sessionReplay, __test__ } = await import('../dist-test/replay.js')
 
 // ---- fake rrweb ---------------------------------------------------------
 
@@ -233,7 +233,7 @@ async function answerConsent(label) {
 
 const requests = path => calls.filter(c => c.url.includes(path))
 // Create calls only. `/api/replay-sessions` is also a prefix of the chunk
-// PUT and the finalise POST, so match the exact endpoint.
+// POST and the finalise POST, so match the exact endpoint.
 const createCalls = () =>
 	calls.filter(c => c.method === 'POST' && c.url.endsWith('/api/replay-sessions'))
 
@@ -288,8 +288,23 @@ test('captureSnapshotEvents honours the recorder masking defaults', async () => 
 	assert.equal(opts.maskAllInputs, true, 'inputs are masked by default')
 	assert.equal(opts.maskAllInputs, __test__.DEFAULTS.maskAllInputs)
 	assert.equal(opts.maskTextSelector, __test__.DEFAULTS.maskTextSelector)
-	assert.equal(opts.blockSelector, __test__.DEFAULTS.blockSelector)
+	assert.ok(opts.blockSelector.startsWith(`${__test__.DEFAULTS.blockSelector}, `), 'the configured block selector still applies')
 	assert.equal(opts.inlineStylesheet, __test__.DEFAULTS.inlineStylesheet)
+})
+
+test('captureSnapshotEvents always blocks the widget and the consent prompt, whatever blockSelector says', async () => {
+	for (const blockSelector of ['[data-usero-block]', '.private', '']) {
+		recordOptions = []
+		await __test__.captureSnapshotEvents(
+			{ maskAllInputs: true, maskTextSelector: '', inlineStylesheet: true, blockSelector },
+			{ debug() {}, info() {}, warn() {}, error() {} },
+			500,
+		)
+		const selectors = recordOptions[0].blockSelector.split(',').map(s => s.trim())
+		assert.ok(selectors.includes('[data-usero-widget]'), `widget host blocked with blockSelector "${blockSelector}"`)
+		assert.ok(selectors.includes('[data-usero-session-context-consent]'), 'consent prompt blocked')
+		if (blockSelector) assert.ok(selectors.includes(blockSelector), 'custom selector kept')
+	}
 })
 
 test('captureSnapshotEvents gives up inside its budget when no snapshot arrives', async () => {
@@ -377,6 +392,29 @@ test('ask never records ambiently', async () => {
 	plugin.onDestroy(ctx)
 })
 
+// The feedback has already gone out by the time afterFeedbackSubmit runs;
+// `feedbackId` and `replayLinkToken` stand in for the POST response.
+function submitAndAfter(plugin, ctx, feedbackId = 'fb-1', replayLinkToken = 'link-token-1') {
+	const patch = plugin.onFeedbackSubmit(ctx)
+	plugin.afterFeedbackSubmit(ctx, {
+		submission: { clientId: ctx.clientId, ...(patch ?? {}) },
+		feedbackId: Promise.resolve(feedbackId),
+		replayLinkToken: Promise.resolve(replayLinkToken),
+	})
+	return patch
+}
+
+async function waitFor(condition, ms = 1000) {
+	const started = Date.now()
+	while (!condition()) {
+		if (Date.now() - started > ms) return false
+		await delay(5)
+	}
+	return true
+}
+
+const finaliseCalls = () => calls.filter(c => c.url.includes('/finalise'))
+
 test('ask plus decline: nothing is captured and nothing is transmitted', async () => {
 	configMode = 'ask'
 	const plugin = sessionReplay()
@@ -385,12 +423,12 @@ test('ask plus decline: nothing is captured and nothing is transmitted', async (
 	await delay(40)
 	const callsBefore = calls.length
 
-	const submit = plugin.onFeedbackSubmit(ctx)
+	const patch = submitAndAfter(plugin, ctx)
+	assert.equal(patch, undefined, 'nothing awaited or attached before the feedback POST')
 	const clicked = await answerConsent("Don't include")
 	assert.ok(clicked, 'the consent prompt was shown before anything was captured')
-	const patch = await submit
+	await delay(30)
 
-	assert.equal(patch, undefined, 'no replay linkage on the submission')
 	assert.equal(loads, 0, 'the page was never captured, so there is nothing to discard')
 	assert.equal(calls.length, callsBefore, 'not one byte about the page left the browser')
 	assert.equal(body.children.length, 0, 'the prompt cleans itself up')
@@ -405,16 +443,30 @@ test('ask plus Escape declines, and still transmits nothing', async () => {
 	await delay(40)
 	const callsBefore = calls.length
 
-	const submit = plugin.onFeedbackSubmit(ctx)
-	await delay(20)
-	assert.ok(findButton('Include'), 'prompt rendered')
+	submitAndAfter(plugin, ctx)
+	assert.ok(await waitFor(() => findButton('Include') !== undefined), 'prompt rendered')
 	for (const fn of documentListeners.keydown ?? []) fn({ key: 'Escape' })
-	const patch = await submit
+	await delay(30)
 
-	assert.equal(patch, undefined)
 	assert.equal(loads, 0, 'nothing captured')
 	assert.equal(calls.length, callsBefore, 'nothing transmitted')
 	assert.equal(body.children.length, 0, 'the prompt is torn down')
+	plugin.onDestroy(ctx)
+})
+
+test('a failed feedback submit never prompts or captures', async () => {
+	configMode = 'ask'
+	const plugin = sessionReplay()
+	const ctx = makeContext()
+	plugin.onInit(ctx)
+	await delay(40)
+	const callsBefore = calls.length
+
+	submitAndAfter(plugin, ctx, null)
+	await delay(40)
+	assert.equal(findButton('Include'), undefined, 'no prompt for feedback that did not land')
+	assert.equal(loads, 0)
+	assert.equal(calls.length, callsBefore)
 	plugin.onDestroy(ctx)
 })
 
@@ -425,23 +477,20 @@ test('ask plus accept: one snapshot-only session, one chunk, one finalise', asyn
 	plugin.onInit(ctx)
 	await delay(40)
 
-	const submit = plugin.onFeedbackSubmit(ctx)
+	submitAndAfter(plugin, ctx)
 	assert.ok(await answerConsent('Include'), 'prompt shown')
-	const patch = await submit
-
-	assert.ok(patch, 'the snapshot is attached')
-	assert.equal(patch.replayOffsetMs, 0, 'a snapshot is a single frame at the moment of submit')
-	assert.ok(patch.sessionReplayId)
+	assert.ok(await waitFor(() => finaliseCalls().length === 1), 'snapshot shipped in the background')
 
 	const creates = createCalls()
 	assert.equal(creates.length, 1)
 	const createBody = JSON.parse(creates[0].body)
 	assert.equal(createBody.snapshotOnly, true)
 	assert.equal(createBody.consented, true, 'consent is reported to the server')
+	assert.equal(createBody.feedbackId, 'fb-1', 'the create carries the link, independent of the upload')
 
-	const chunks = calls.filter(c => c.method === 'PUT' && c.url.includes('/chunks/'))
+	const chunks = calls.filter(c => c.method === 'POST' && c.url.includes('/chunks/'))
 	assert.equal(chunks.length, 1)
-	assert.ok(chunks[0].url.endsWith('/chunks/0'), 'a snapshot session has exactly one chunk')
+	assert.match(chunks[0].url, /\/chunks\/0\?/, 'a snapshot session has exactly one chunk')
 
 	const finalises = calls.filter(c => c.url.includes('/finalise'))
 	assert.equal(finalises.length, 1)
@@ -461,16 +510,31 @@ test('always falls back to a snapshot when no recording is active', async () => 
 	await delay(40)
 	assert.equal(createCalls().length, 0, 'sampled out, so no recording')
 
-	const patch = await plugin.onFeedbackSubmit(ctx)
-	assert.ok(patch, 'the feedback still gets page context')
-	assert.equal(patch.replayOffsetMs, 0)
+	const patch = submitAndAfter(plugin, ctx)
+	assert.equal(patch, undefined, 'the POST does not wait for the snapshot')
+	assert.ok(await waitFor(() => finaliseCalls().length === 1), 'the feedback still gets page context')
 
 	const creates = createCalls()
 	assert.equal(creates.length, 1)
 	const createBody = JSON.parse(creates[0].body)
 	assert.equal(createBody.snapshotOnly, true)
+	assert.equal(createBody.feedbackId, 'fb-1')
+	assert.equal(createBody.linkToken, 'link-token-1', 'the create proves this browser sent the feedback')
 	assert.equal(createBody.consented, false, 'always mode does not claim a consent it never asked for')
 	assert.equal(body.children.length, 0, 'always mode never shows the prompt')
+	plugin.onDestroy(ctx)
+})
+
+test('no link token in the feedback response: no snapshot is captured or uploaded', async () => {
+	configMode = 'always'
+	const plugin = sessionReplay({ sampleRate: 0 })
+	const ctx = makeContext()
+	plugin.onInit(ctx)
+	await delay(40)
+	submitAndAfter(plugin, ctx, 'fb-1', null)
+	await delay(100)
+	assert.equal(createCalls().length, 0, 'nothing could link it, so nothing is sent')
+	assert.equal(loads, 0, 'rrweb never loads for it')
 	plugin.onDestroy(ctx)
 })
 
