@@ -10,7 +10,7 @@
 // Flags:
 //   --runs N         runs per scenario (default 5)
 //   --sdk DIR        built SDK to test (default ./dist), e.g. an older build
-//   --scenario NAME  only run one scenario (live | snapshot | ask)
+//   --scenario NAME  only run one scenario (live | snapshot | ask | resume)
 //   --api URL        use a real Usero server instead of the mock (needs --client)
 //   --client ID      clientId for --api runs
 //   --json FILE      also write every run and the medians as JSON
@@ -31,6 +31,11 @@ const BUDGETS = {
 	clickToSuccessMs: 400,
 	longTaskToSuccessMs: 50,
 	longTask5sMs: 300,
+	// 1.6.1: rrweb's first full snapshot, medians 75 to 101 ms across reruns; a forced second snapshot made it
+	// about 1.5x. The widget check's "exactly one full snapshot" is the deterministic guard against that.
+	recordLongTaskMs: 140,
+	// A return from hidden does no main-thread work: no long task (50 ms or more) on any run.
+	returnLongTaskMs: 0,
 }
 
 const NETWORK = {
@@ -48,6 +53,8 @@ const SCENARIOS = {
 	snapshot: { mode: 'always', sampleRate: 0, waitForRecording: false },
 	// Ask first: consent prompt, then a consented snapshot.
 	ask: { mode: 'ask', sampleRate: 1, waitForRecording: false },
+	// App switch: hidden, frozen, shown again; the same session must carry on and link.
+	resume: { mode: 'always', sampleRate: 1, waitForRecording: true, appSwitch: true },
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -164,7 +171,19 @@ const { initUseroFeedbackWidget } = await import('/sdk/vanilla.js')
 const { sessionReplay } = await import('/sdk/replay.js')
 const replayOptions = { sampleRate: Number(p.get('sampleRate')) }
 if (p.get('recording')) replayOptions.recording = p.get('recording')
-initUseroFeedbackWidget({ clientId: p.get('client'), baseUrl: p.get('api'), plugins: [sessionReplay(replayOptions)] })
+if (p.get('late')) {
+  // Widget-in-replay check: record first, then mount the widget and a shadow root attached before its host joins the DOM.
+  sessionReplay({ ...replayOptions, clientId: p.get('client'), apiUrl: p.get('api') }).start()
+  while (!window.__useroSessionReplayActive__?.store?.stopRecording) await new Promise(r => setTimeout(r, 50))
+  initUseroFeedbackWidget({ clientId: p.get('client'), baseUrl: p.get('api') })
+  const host = document.createElement('div')
+  const root = host.attachShadow({ mode: 'open' })
+  document.body.appendChild(host)
+  root.innerHTML = '<p class="late-shadow-probe">custom shadow content</p>'
+  window.__lateMounted = true
+} else {
+  initUseroFeedbackWidget({ clientId: p.get('client'), baseUrl: p.get('api'), plugins: [sessionReplay(replayOptions)] })
+}
 </script></body></html>`
 }
 
@@ -257,6 +276,13 @@ function overlap(tasks, from, to) {
 	return total
 }
 
+// Longest single long task overlapping [from, to], 0 when there is none.
+function longest(tasks, from, to) {
+	let max = 0
+	for (const t of tasks) if (t.start < to && t.start + t.duration > from) max = Math.max(max, t.duration)
+	return max
+}
+
 async function waitUntil(fn, timeoutMs, label) {
 	const started = Date.now()
 	for (;;) {
@@ -264,6 +290,80 @@ async function waitUntil(fn, timeoutMs, label) {
 		if (value) return value
 		if (Date.now() - started > timeoutMs) throw new Error(`timed out waiting for ${label}`)
 		await new Promise(r => setTimeout(r, 50))
+	}
+}
+
+const liveReplayId = page => page.evaluate(() => window.__useroSessionReplayActive__?.store?.sessionReplayId ?? null)
+
+// Headless tabs never go hidden, so emulate an app switch: report hidden and fire visibilitychange, freeze
+// the page for 2 s through CDP (as Android does to a background tab), then come back.
+async function switchAppAndBack(cdp, page) {
+	const hiddenId = await liveReplayId(page)
+	const setVisibility = state =>
+		page.evaluate(s => {
+			Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => s })
+			Object.defineProperty(document, 'hidden', { configurable: true, get: () => s === 'hidden' })
+			document.dispatchEvent(new Event('visibilitychange'))
+		}, state)
+	await setVisibility('hidden')
+	await cdp.send('Page.setWebLifecycleState', { state: 'frozen' })
+	await page.waitForTimeout(2000)
+	await cdp.send('Page.setWebLifecycleState', { state: 'active' })
+	await setVisibility('visible')
+	const shownAt = await page.evaluate(() => performance.now())
+	const chunksAtReturn = chunkRequests(hiddenId).length
+	// Nothing touches the page for 2 s, so long tasks in that window are the SDK's return work alone.
+	await page.waitForTimeout(2000)
+	return { sessionId: hiddenId, shownAt, chunksAtReturn }
+}
+
+const chunkRequests = id => api.requests.filter(r => r.path.startsWith(`/api/replay-sessions/${id}/chunks/`))
+
+// Same session continued: never finalised, and chunks kept landing after the return.
+function sameSessionContinued({ sessionId, chunksAtReturn }) {
+	const finalised = api.requests.some(r => r.path === `/api/replay-sessions/${sessionId}/finalise`)
+	return !finalised && chunkRequests(sessionId).length > chunksAtReturn
+}
+
+const decodeChunk = raw => JSON.parse((raw[0] === 0x1f && raw[1] === 0x8b ? gunzipSync(raw) : raw).toString('utf8'))
+
+// The SDK no longer forces a full snapshot when the widget mounts: rrweb's attachShadow patch must pick up a
+// widget mounted after recording started, its panel, and a shadow root attached before its host joined the DOM.
+async function checkWidgetInReplay(browser, pageOrigin, apiOrigin) {
+	const context = await browser.newContext({ viewport: { width: 390, height: 844 } })
+	const page = await context.newPage()
+	try {
+		const requestsBefore = api.requests.length
+		const query = new URLSearchParams({ client: 'perf-always', api: apiOrigin, sampleRate: '1', late: '1' })
+		await page.goto(`${pageOrigin}/page.html?${query}`)
+		await page.waitForFunction(() => window.__lateMounted === true, null, { timeout: 20000 })
+		await page.locator('.fb-btn').click()
+		await page.locator('.fb-ta').fill('widget in replay check')
+		// Two chunk intervals so the panel mutations upload.
+		await page.waitForTimeout(7000)
+		const id = await page.evaluate(() => window.__useroSessionReplayActive__?.store?.sessionReplayId ?? null)
+		const events = api.requests
+			.slice(requestsBefore)
+			.filter(r => r.raw && r.path.startsWith(`/api/replay-sessions/${id}/chunks/`))
+			.sort((a, b) => Number(a.path.split('/').pop()) - Number(b.path.split('/').pop()))
+			.flatMap(r => decodeChunk(r.raw))
+		const shadowAdds = JSON.stringify(
+			events.filter(e => e.type === 3 && e.data.source === 0).flatMap(e => e.data.adds.filter(a => a.node.isShadow)),
+		)
+		const result = {
+			fullSnapshots: events.filter(e => e.type === 2).length,
+			launcher: shadowAdds.includes('fb-btn'),
+			panel: shadowAdds.includes('fb-ta'),
+			preAttachedRoot: shadowAdds.includes('late-shadow-probe'),
+		}
+		const failures = []
+		if (result.fullSnapshots !== 1) failures.push(`expected 1 full snapshot, got ${result.fullSnapshots}`)
+		if (!result.launcher) failures.push('launcher (.fb-btn) missing from incremental shadow adds')
+		if (!result.panel) failures.push('panel (.fb-ta) missing from incremental shadow adds')
+		if (!result.preAttachedRoot) failures.push('shadow root attached before its host joined the DOM is missing')
+		return { ...result, failures }
+	} finally {
+		await context.close()
 	}
 }
 
@@ -291,6 +391,7 @@ async function runOnce(browser, pageOrigin, apiOrigin, name, scenario) {
 				'live recording',
 			)
 		}
+		const appSwitch = scenario.appSwitch ? await switchAppAndBack(cdp, page) : null
 
 		await page.locator('.fb-btn').click()
 		await page.locator('.fb-ec').first().click()
@@ -322,7 +423,14 @@ async function runOnce(browser, pageOrigin, apiOrigin, name, scenario) {
 				5000,
 				'feedback POST at the mock',
 			)
-			if (post.body.sessionReplayId) {
+			if (appSwitch) {
+				// Linked only when the POST carries the session that was live before the switch, it was never
+				// finalised and it kept uploading chunks after the return.
+				const ok =
+					post.body.sessionReplayId === appSwitch.sessionId &&
+					(await waitUntil(() => sameSessionContinued(appSwitch), 10000, 'chunks after return').catch(() => false))
+				linked = ok ? 'in POST, same session' : null
+			} else if (post.body.sessionReplayId) {
 				linked = 'in POST'
 			} else {
 				const create = await waitUntil(
@@ -356,7 +464,9 @@ async function runOnce(browser, pageOrigin, apiOrigin, name, scenario) {
 			...window.__perf,
 			load: performance.getEntriesByName('usero:snapshot-load')[0]?.duration ?? null,
 			serialise: performance.getEntriesByName('usero:snapshot-serialise')[0]?.duration ?? null,
+			recordStart: performance.getEntriesByName('usero:record-start')[0]?.toJSON() ?? null,
 		}))
+		const recordStart = perf.recordStart
 		const post = perf.fetches.find(f => f.method === 'POST' && /\/api\/feedback$/.test(f.url))
 		const beforePost = perf.fetches.filter(f => f.at >= perf.clickAt && f.at < (post?.at ?? Infinity))
 		const preflighted = api.requests.slice(requestsBefore).some(r => r.method === 'OPTIONS' && r.path === '/api/feedback')
@@ -371,6 +481,11 @@ async function runOnce(browser, pageOrigin, apiOrigin, name, scenario) {
 			preflighted,
 			linked,
 			widgetInSnapshot,
+			recordStartMs: recordStart ? recordStart.duration : null,
+			recordLongTaskMs: recordStart
+				? longest(perf.longtasks, recordStart.startTime, recordStart.startTime + recordStart.duration)
+				: null,
+			returnLongTaskMs: appSwitch ? longest(perf.longtasks, appSwitch.shownAt, appSwitch.shownAt + 2000) : null,
 		}
 	} finally {
 		await context.close()
@@ -388,9 +503,16 @@ async function main() {
 	// localhost vs 127.0.0.1 keeps the API cross-origin, like a customer site calling usero.io.
 	const apiOrigin = args.api ?? `http://localhost:${mock.port}`
 	const browser = await chromium.launch({ headless: true })
-	const names = args.scenario ? [args.scenario] : Object.keys(SCENARIOS)
+	const names = args.scenario ? [args.scenario].filter(n => n in SCENARIOS) : Object.keys(SCENARIOS)
 	const results = {}
+	let widgetCheck = null
 	try {
+		if (!args.api && (!args.scenario || args.scenario === 'widget')) {
+			widgetCheck = await checkWidgetInReplay(browser, pageOrigin, apiOrigin)
+			const { fullSnapshots, launcher, panel, preAttachedRoot } = widgetCheck
+			const found = JSON.stringify({ fullSnapshots, launcher, panel, preAttachedRoot })
+			console.log(`widget in replay (mounted after record start): ${found}`)
+		}
 		for (const name of names) {
 			results[name] = []
 			for (let i = 0; i < runs; i++) {
@@ -415,6 +537,9 @@ async function main() {
 		'longTask5sMs',
 		'snapshotLoadMs',
 		'snapshotSerialiseMs',
+		'recordStartMs',
+		'recordLongTaskMs',
+		'returnLongTaskMs',
 	]
 	const medians = {}
 	console.log(`\nMedians over ${runs} runs (latency ${NETWORK.latency} ms, CPU ${CPU_SLOWDOWN}x), SDK ${sdkDir}`)
@@ -433,8 +558,12 @@ async function main() {
 	if (args.json) await writeFile(args.json, JSON.stringify({ network: NETWORK, cpu: CPU_SLOWDOWN, results, medians }, null, 2))
 
 	if (args['no-budget']) return
-	const failures = []
+	// A missing widget is a correctness failure, not a timing one, but it fails the run all the same.
+	const failures = widgetCheck ? widgetCheck.failures.map(f => `widget in replay: ${f}`) : []
 	for (const name of names) {
+		// Return work is held to zero on every run, not just the median.
+		const worstReturn = Math.max(0, ...results[name].map(r => r.returnLongTaskMs ?? 0))
+		if (worstReturn > BUDGETS.returnLongTaskMs) failures.push(`${name} returnLongTaskMs ${Math.round(worstReturn)} on one run`)
 		for (const [metric, budget] of Object.entries(BUDGETS)) {
 			const value = medians[name][metric]
 			if (value !== null && value > budget) failures.push(`${name} ${metric} ${Math.round(value)} > ${budget}`)

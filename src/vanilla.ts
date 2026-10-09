@@ -291,17 +291,8 @@ export function initUseroFeedbackWidget(
 	document.body.appendChild(host)
 	const root = host.attachShadow({ mode: 'open' })
 
-	// Notify recording plugins (e.g. session-replay) that a shadow root they
-	// need to observe has just been mounted into the page. rrweb's automatic
-	// shadow-root traversal only catches roots that exist at record-start
-	// time (via the initial full snapshot) OR that get attached as part of
-	// a new node addition observed by its MutationObserver. Our widget host
-	// is appended to <body> first and `attachShadow` is called immediately
-	// after, so the observed mutation does not yet have a shadowRoot. The
-	// session-replay plugin handles this signal by re-taking a full
-	// snapshot, which causes rrweb to walk into and start observing this
-	// shadow tree. Dispatched as a CustomEvent on window so the plugin
-	// stays decoupled from the widget.
+	// Tell plugins the widget mounted (session-replay preloads rrweb on panel open). Recording needs no help:
+	// the host is in the DOM before attachShadow, so rrweb's attachShadow patch observes the new root.
 	// Re-poll getUser at widget interaction boundaries (panel open, mount).
 	// This catches "user logged in while widget was idle" without setting
 	// up a polling timer that would tick on background tabs. Identify dedupe

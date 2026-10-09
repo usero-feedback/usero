@@ -147,6 +147,8 @@ The headless controller (`createUseroFeedback` / `useUseroFeedback`) never rende
 
 Record what your users actually did, with or without the feedback widget. Recording streams rrweb events to Usero in gzipped chunks while the user is on the page, so you capture whole sessions rather than only the moments around a feedback submission. On a slow connection the SDK merges waiting chunks into larger ones instead of dropping them, and sends what it still holds when the page is hidden or closed.
 
+Switching to another app or tab does not end the recording. The SDK sends what it has buffered and keeps recording, and when the person comes back the same session carries on, so feedback sent after an app switch still links to it. If they never come back, Usero closes the session once it has been quiet for 3 minutes (the check runs every 5), with its end time set to the last upload. A full page load, such as following a normal link to another page on your site, starts a new session; client-side route changes stay in the same one.
+
 `rrweb` ships inside the replay chunk, so `npm install @usero/sdk` is the only install step. Replay lives in its own subpath export (`@usero/sdk/replay`), so consumers who never import it pay zero rrweb bytes on the base bundle. Even consumers who DO import it don't pay rrweb's bytes upfront: rrweb lazy-loads at runtime via dynamic import only once a recording actually starts.
 
 ### Standalone (no widget)
@@ -184,7 +186,7 @@ function App() {
 }
 ```
 
-The hook is SSR-safe (a no-op on the server), StrictMode-safe (the dev-mode double effect starts exactly one recording), and page-scoped: recording survives the component unmounting on client-side route changes, and ends when the page is hidden or closed. The hook returns the replay instance, so you can call `.stop()` to end a recording early. Options are captured on first render; to track a user who logs in mid-session, pass a `getUser` callback rather than changing options.
+The hook is SSR-safe (a no-op on the server), StrictMode-safe (the dev-mode double effect starts exactly one recording), and page-scoped: recording survives the component unmounting on client-side route changes, and ends when the page is closed. The hook returns the replay instance, so you can call `.stop()` to end a recording early. Options are captured on first render; to track a user who logs in mid-session, pass a `getUser` callback rather than changing options.
 
 ### With the feedback widget
 
@@ -303,7 +305,7 @@ const usero = createUseroFeedback({
 })
 ```
 
-One caveat: if you render your feedback UI inside a ShadowRoot, call `usero.notifyShadowMount(root)` after attaching it so the recorder re-snapshots and captures your UI. Light-DOM UIs are recorded without any extra call.
+Feedback UI inside an open ShadowRoot is recorded without any extra call, whether you attach the root before or after its host joins the page. `usero.notifyShadowMount(root)` still exists, so existing calls keep working, but since 1.6.1 recording no longer needs it.
 
 ### Screenshots
 

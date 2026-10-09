@@ -25,20 +25,25 @@ replay link was lost every time the chunk upload (1.5 s median in the US, 2.6 s 
 | --- | --- | --- |
 | Critical path test | `tests/submit-critical-path.test.mjs` (`npm test`) | Any request is started before the feedback POST, or the POST leaves more than 60 ms after submit with 300 ms per request, in any mode; or the replay link does not land afterwards |
 | Bundle budgets | `scripts/verify-dist.mjs` (`GZIP_BUDGETS`, runs in `npm run build`) | Any exported entry (entry file plus the chunks it imports statically) or the lazy rrweb chunk grows past its gzipped budget, or a new entry has no budget |
-| Browser timing | `scripts/perf-submit.mjs` (`npm run perf`) | A scenario median goes over budget in throttled Chromium, a run loses its replay link, or a page snapshot contains the widget or consent prompt |
+| Browser timing | `scripts/perf-submit.mjs` (`npm run perf`) | A scenario median goes over budget in throttled Chromium, a run loses its replay link, a page snapshot contains the widget or consent prompt, or any run has a long task on return from hidden |
+| Widget in replay | `scripts/perf-submit.mjs` (`npm run perf`, or `--scenario widget` alone) | With recording started first, the widget launcher, its open panel, or a shadow root attached before its host joined the DOM is missing from the incremental events, or there is more than one full snapshot |
 | Server round trips | `app/utils/feedbackSubmitRoundTrips.test.ts` (monorepo `npx vitest run`) | `POST /api/feedback` makes more than 2 serial D1 round trips before responding (3 with screenshots) |
 
 ## `npm run perf`
 
 Builds, then boots a static host page (a product listing of a few thousand nodes) and a cross-origin mock API, and drives the
 real vanilla widget plus `sessionReplay()` in Playwright's own headless Chromium. CDP throttling: 250 ms latency, 4 Mbps down,
-1.5 Mbps up, 4x CPU slowdown. Three scenarios, 5 runs each, about 90 s in total:
+1.5 Mbps up, 4x CPU slowdown. Four scenarios, 5 runs each, about two minutes in total:
 
 - `live`: an ambient recording is running, so its id rides in the POST.
 - `snapshot`: Always mode with no recording live (sampled out), so a page snapshot is taken after the submit.
 - `ask`: Ask first mode, the harness clicks Include on the prompt.
+- `resume`: a mobile app switch. With a recording live, the page reports hidden and fires `visibilitychange`, is frozen
+  for 2 s through CDP `Page.setWebLifecycleState`, then comes back visible. Headless tabs never go hidden on their own,
+  so the visibility change is emulated in page. Nothing touches the page for 2 s after the return, then the submit must
+  carry the same session id as before the switch.
 
-Flags: `--runs N`, `--scenario live|snapshot|ask`, `--sdk <dist dir>` to measure another build (for example an older release
+Flags: `--runs N`, `--scenario live|snapshot|ask|resume`, `--sdk <dist dir>` to measure another build (for example an older release
 built into a scratch dir), `--json <file>`, `--no-budget` for a baseline that never fails, and `--api <url> --client <id>` to run
 against a real Usero server (a local dev server, for example) instead of the mock.
 
@@ -51,7 +56,14 @@ Reading the output: one line per run, then a median table.
 - `longTask5s`: long-task time in the 5 s after the click. Includes the snapshot serialise, which runs after the success frame.
 - `snapshotLoad` / `snapshotSerialise`: the rrweb chunk load and the DOM serialise of the snapshot (User Timing entries
   `usero:snapshot-load` and `usero:snapshot-serialise`). Load is near 0 because rrweb is preloaded on panel open.
-- `linked`: runs where the replay ended up linked (in the POST for `live`, at snapshot create otherwise).
+- `recordStart` / `recordLongTask` (`live` and `resume`): how long rrweb's `record()` call took (User Timing
+  `usero:record-start`; it serialises the whole page synchronously, after an idle callback) and the longest long task
+  overlapping it. This is the one main-thread cost of ambient recording, paid once per page load.
+- `returnLongTask` (`resume` only): the longest long task in the 2 s after the tab comes back. Its budget of 0 ms means no
+  long task at all, that is nothing of 50 ms or more (the browser only reports tasks that long), on any run: a return does
+  no work, the recorder never stopped.
+- `linked`: runs where the replay ended up linked (in the POST for `live`, at snapshot create for `snapshot` and `ask`; for
+  `resume`, the POST carries the session from before the switch, which was never finalised and kept uploading chunks).
 - `requests before the POST` lists anything fetched between the click and the POST; on a healthy build it does not print.
 
 ## Budgets
@@ -66,6 +78,21 @@ and shipped in 1.6.0. The task dir `docs/pm/tasks/fast-feedback-submit/` in the 
 | longTaskToSuccess | 141 / 142 ms | 0 ms | 50 ms |
 | longTask5s | 141 / 142 ms | about 135 ms (serialise, after success) | 300 ms |
 | replay linked | 0 of 5 runs | 5 of 5 | every run |
+
+Added in 1.6.1 (medians of 5 runs, 2026-10-09). Before it, the plugin forced a second full snapshot right after `record()`
+and on every widget mount and panel open; rrweb's own `attachShadow` patch already records the widget's shadow root.
+
+| Metric | Before 1.6.1 | 1.6.1 | Budget |
+| --- | --- | --- | --- |
+| recordLongTask (first load) | about 1.5x (two full snapshots, 117 ms against 77) | medians 75 to 101 ms across reruns | 140 ms |
+| returnLongTask (after an app switch) | a new session and snapshot (111 ms in the dropped resume draft) | 0 ms | 0 ms, every run |
+
+The record budget is loose because machine load moves its median by about 25 ms between reruns. The deterministic guard
+against a second full snapshot is the widget-in-replay check, which requires exactly one.
+
+While the tab is hidden the periodic flush is paused: events wait in memory until a batch reaches `chunkMaxEvents` or
+`chunkMaxBytes`, then upload merged. On a page mutating 10 times a second, 90 s hidden at 4x CPU, that took chunk uploads
+from 33 to 3 and bytes from 314 to 222 KB, with the heap within 1.3 MB of its starting size and 0 ms of work on return.
 
 Bundle budgets are about 5% over the fast-submit build's gzipped sizes and live in `GZIP_BUDGETS` in `scripts/verify-dist.mjs`.
 The six replay entries were then reset to about 5% over 1.6.0 to make room for the replay upload lane from the chunk-loss fix,

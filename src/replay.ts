@@ -40,9 +40,12 @@
 //      the feedback record can FK at the moment of submit. Does NOT
 //      attach `replayEvents` (legacy field) — chunked uploads carry the
 //      events out-of-band.
-//   4. onDestroy / pagehide / visibilitychange -> hidden: best-effort flush
-//      remaining buffer, then sendBeacon to
-//      /api/replay-sessions/:id/finalise with the end-timestamp. Idempotent
+//   4. visibilitychange -> hidden, or pagehide into the bfcache: flush the
+//      buffer on keepalive requests and keep recording, so the same session
+//      carries on when the user comes back (no restart, no new snapshot).
+//      The server closes a session that never returns from its last chunk.
+//   5. onDestroy / real unload (pagehide, not persisted): flush, then
+//      sendBeacon to /api/replay-sessions/:id/finalise. Idempotent
 //      server-side and via a `stopped` guard client-side.
 //
 // Bundle hygiene: rrweb stays lazy via dynamic `import('rrweb')` behind
@@ -253,9 +256,13 @@ interface ReplayStore {
 	uploadLaneRunning: boolean
 	chunkFlushTimer: ReturnType<typeof setInterval> | null
 	startTimer: ReturnType<typeof setTimeout> | null
-	pageHideHandler: (() => void) | null
+	pageHideHandler: ((event: PageTransitionEvent) => void) | null
+	pageShowHandler: ((event: PageTransitionEvent) => void) | null
+	// True between a usero:hidden marker and the next usero:visible, so each change is marked once.
+	away: boolean
 	visibilityHandler: (() => void) | null
-	shadowUpdateHandler: ((event: Event) => void) | null
+	// startAfterMs gate: cancels the pending start on a real exit.
+	gateExitHandler: ((event: Event) => void) | null
 	record: RrwebRecord | null
 	stopRecording: (() => void) | null
 	// Teardown for the SPA URL-change tracker: restores the patched
@@ -872,6 +879,31 @@ function flushPendingChunk(store: ReplayStore, ctx: PluginContext): void {
 	scheduleChunkUpload(store, ctx)
 }
 
+// Periodic flush, visible pages only. While hidden, events still upload once a batch reaches
+// chunkMaxEvents / chunkMaxBytes, so a busy background tab sends a few large chunks, not one every 3 s.
+function startFlushTimer(store: ReplayStore, ctx: PluginContext): void {
+	if (store.chunkFlushTimer || !store.stopRecording) return
+	if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+	store.chunkFlushTimer = setInterval(() => flushPendingChunk(store, ctx), store.options.chunkSeconds * 1000)
+}
+
+// Custom rrweb events marking time away, so the player can compress a hidden stretch even when the page kept
+// changing in the background. Payload `{ reason: 'visibility' | 'bfcache' }`.
+function markAway(store: ReplayStore, away: boolean, reason: string): void {
+	if (store.away === away || !store.stopRecording) return
+	store.away = away
+	try {
+		store.record?.addCustomEvent?.(away ? 'usero:hidden' : 'usero:visible', { reason })
+	} catch {
+		// Markers are a playback hint only.
+	}
+}
+
+function pauseFlushTimer(store: ReplayStore): void {
+	if (store.chunkFlushTimer) clearInterval(store.chunkFlushTimer)
+	store.chunkFlushTimer = null
+}
+
 function stopRrweb(store: ReplayStore): void {
 	// Restore patched history methods + remove popstate listener before we
 	// drop the record reference, so the SPA URL-change patch never outlives
@@ -885,10 +917,7 @@ function stopRrweb(store: ReplayStore): void {
 		}
 		store.stopRecording = null
 	}
-	if (store.chunkFlushTimer) {
-		clearInterval(store.chunkFlushTimer)
-		store.chunkFlushTimer = null
-	}
+	pauseFlushTimer(store)
 }
 
 // rrweb tag for SPA URL-change custom events. Consumers (replay viewer, AI
@@ -993,13 +1022,16 @@ function stopUrlChangeTracking(store: ReplayStore): void {
 function startRecording(store: ReplayStore, ctx: PluginContext): void {
 	if (store.cancelled || store.stopped || store.stopRecording || store.loadInProgress) return
 	store.loadInProgress = true
-	void loadRrwebRecord().then(record => {
+	// record() serialises the whole DOM synchronously, so it waits for an idle moment.
+	void loadRrwebRecord().then(async record => {
+		if (record) await whenIdle()
 		store.loadInProgress = false
 		if (store.cancelled || store.stopped || !record) {
 			if (!record) ctx.logger.warn('rrweb failed to load, replay disabled')
 			return
 		}
 		try {
+			const recordStart = nowMs()
 			const stop = record({
 				emit: event => {
 					if (store.stopped || store.cancelled) return
@@ -1056,32 +1088,18 @@ function startRecording(store: ReplayStore, ctx: PluginContext): void {
 					return true
 				},
 			})
+			markDuration('usero:record-start', recordStart)
 			store.stopRecording = stop
 			store.record = record
 			// Capture SPA route changes as custom events so the replay stream
 			// knows the URL after the first page load.
 			startUrlChangeTracking(store, ctx)
-			scheduleShadowSnapshot(store, ctx)
 
-			store.chunkFlushTimer = setInterval(
-				() => flushPendingChunk(store, ctx),
-				store.options.chunkSeconds * 1000,
-			)
+			startFlushTimer(store, ctx)
 		} catch (err) {
 			ctx.logger.error('rrweb record() threw', err)
 		}
 	})
-}
-
-function scheduleShadowSnapshot(store: ReplayStore, ctx: PluginContext): void {
-	if (store.cancelled || store.stopped || !store.record || !store.stopRecording) return
-	const fn = store.record.takeFullSnapshot
-	if (typeof fn !== 'function') return
-	try {
-		fn(true)
-	} catch (err) {
-		ctx.logger.warn('takeFullSnapshot threw', err)
-	}
 }
 
 // POSTs the finalise call for a session. Shared by the ambient recording
@@ -1157,20 +1175,17 @@ interface SnapshotMaskingOptions {
 
 // Resolves after the browser has painted and then gone idle, so background
 // work never delays a frame the user is waiting on (the success state).
-function afterNextPaint(): Promise<void> {
+async function afterNextPaint(): Promise<void> {
+	if (typeof requestAnimationFrame === 'function') {
+		await new Promise<void>(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)))
+	}
+	await whenIdle()
+}
+
+function whenIdle(): Promise<void> {
 	return new Promise<void>(resolve => {
-		const whenIdle = (): void => {
-			if (typeof requestIdleCallback === 'function') {
-				requestIdleCallback(() => resolve(), { timeout: 2000 })
-			} else {
-				setTimeout(resolve, 0)
-			}
-		}
-		if (typeof requestAnimationFrame === 'function') {
-			requestAnimationFrame(() => setTimeout(whenIdle, 0))
-		} else {
-			whenIdle()
-		}
+		if (typeof requestIdleCallback === 'function') requestIdleCallback(() => resolve(), { timeout: 2000 })
+		else setTimeout(resolve, 0)
 	})
 }
 
@@ -1591,13 +1606,18 @@ export function sessionReplay(options: SessionReplayOptions = {}): SessionReplay
 			window.removeEventListener('pagehide', store.pageHideHandler)
 			store.pageHideHandler = null
 		}
+		if (store.pageShowHandler) {
+			window.removeEventListener('pageshow', store.pageShowHandler)
+			store.pageShowHandler = null
+		}
 		if (store.visibilityHandler) {
 			document.removeEventListener('visibilitychange', store.visibilityHandler)
 			store.visibilityHandler = null
 		}
-		if (store.shadowUpdateHandler) {
-			window.removeEventListener('usero:shadow-update', store.shadowUpdateHandler)
-			store.shadowUpdateHandler = null
+		if (store.gateExitHandler) {
+			window.removeEventListener('pagehide', store.gateExitHandler)
+			window.removeEventListener('beforeunload', store.gateExitHandler)
+			store.gateExitHandler = null
 		}
 	}
 
@@ -1660,8 +1680,10 @@ export function sessionReplay(options: SessionReplayOptions = {}): SessionReplay
 				chunkFlushTimer: null,
 				startTimer: null,
 				pageHideHandler: null,
+				pageShowHandler: null,
+				away: false,
 				visibilityHandler: null,
-				shadowUpdateHandler: null,
+				gateExitHandler: null,
 				record: null,
 				stopRecording: null,
 				stopUrlTracking: null,
@@ -1682,35 +1704,45 @@ export function sessionReplay(options: SessionReplayOptions = {}): SessionReplay
 				},
 			})
 
-			const onShadowUpdate = (): void => scheduleShadowSnapshot(store, ctx)
-			store.shadowUpdateHandler = onShadowUpdate
-			window.addEventListener('usero:shadow-update', onShadowUpdate)
-
-			// Shared unload backstop for both pagehide and visibilitychange.
-			// The `store.stopped` short-circuit makes it idempotent: whichever
-			// of the two fires first finalises + stops rrweb, the other (and any
-			// later onDestroy) becomes a no-op, so we never double-finalise.
-			const stopOnUnload = (): void => {
+			// Real unload finalises once (the `stopped` guard makes a later onDestroy a no-op). A page
+			// entering the bfcache may come back, so it only flushes and keeps the recorder.
+			const onPageHide = (event: PageTransitionEvent): void => {
 				if (store.stopped) return
+				if (event.persisted) {
+					markAway(store, true, 'bfcache')
+					flushForUnload(store, ctx)
+					return
+				}
 				finalise(store, ctx, { useBeacon: true })
 				store.stopped = true
 				stopRrweb(store)
 			}
-			store.pageHideHandler = stopOnUnload
-			window.addEventListener('pagehide', stopOnUnload)
+			store.pageHideHandler = onPageHide
+			window.addEventListener('pagehide', onPageHide)
 
-			// visibilitychange -> hidden is the reliable mobile backstop:
-			// iOS often tears down a backgrounded tab without ever firing
-			// pagehide, which used to leave the replay un-finalised (no
-			// endedAt). visibilitychange fires consistently on backgrounding, so
-			// flushing + finalising here closes that gap. Guarded by the same
-			// idempotent stopOnUnload.
+			// Hidden (app switch, background tab, or iOS about to kill the tab): ship what is buffered
+			// but keep the session open, so a return continues it. A tab that never returns is closed
+			// server-side from its last chunk.
 			const onVisibilityChange = (): void => {
-				if (document.visibilityState !== 'hidden') return
-				stopOnUnload()
+				if (store.stopped) return
+				if (document.visibilityState === 'hidden') {
+					markAway(store, true, 'visibility')
+					pauseFlushTimer(store)
+					flushForUnload(store, ctx)
+					return
+				}
+				markAway(store, false, 'visibility')
+				flushPendingChunk(store, ctx)
+				startFlushTimer(store, ctx)
 			}
 			store.visibilityHandler = onVisibilityChange
 			document.addEventListener('visibilitychange', onVisibilityChange)
+
+			const onPageShow = (event: PageTransitionEvent): void => {
+				if (event.persisted && !store.stopped) markAway(store, false, 'bfcache')
+			}
+			store.pageShowHandler = onPageShow
+			window.addEventListener('pageshow', onPageShow)
 
 			const begin = async (): Promise<void> => {
 				if (store.cancelled) return
@@ -1774,16 +1806,18 @@ export function sessionReplay(options: SessionReplayOptions = {}): SessionReplay
 			}
 
 			if (merged.startAfterMs > 0) {
-				const cancelOnExit = (): void => {
+				// Leaving inside the gate means no session at all; a bfcache entry may come back, so it keeps the timer.
+				const cancelOnExit = (event: Event): void => {
+					if (!store.startTimer || ('persisted' in event && event.persisted === true)) return
 					store.cancelled = true
-					if (store.startTimer) {
-						clearTimeout(store.startTimer)
-						store.startTimer = null
-					}
+					clearTimeout(store.startTimer)
+					store.startTimer = null
 				}
-				window.addEventListener('pagehide', cancelOnExit, { once: true })
-				window.addEventListener('beforeunload', cancelOnExit, { once: true })
+				store.gateExitHandler = cancelOnExit
+				window.addEventListener('pagehide', cancelOnExit)
+				window.addEventListener('beforeunload', cancelOnExit)
 				store.startTimer = setTimeout(() => {
+					store.startTimer = null
 					void begin()
 				}, merged.startAfterMs)
 			} else {

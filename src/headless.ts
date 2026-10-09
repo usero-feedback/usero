@@ -90,10 +90,8 @@ export interface UseroFeedbackController {
 	// Resolves once every plugin's onInit has settled (fulfilled OR
 	// rejected). Resolves immediately when no plugins are registered.
 	whenReady: () => Promise<void>
-	// Tell recording plugins (session replay) that a shadow root hosting
-	// your custom UI was just mounted, so the recorder re-snapshots and
-	// captures it. Only needed if you render your feedback UI inside a
-	// ShadowRoot; light-DOM UIs are recorded automatically.
+	// Kept for compatibility: session replay records open shadow roots
+	// without it since 1.6.1.
 	notifyShadowMount: (root: ShadowRoot) => void
 	// Run every plugin's onDestroy and inert this controller. Further
 	// submits resolve with `{ success: false }`.
@@ -183,10 +181,8 @@ export function createUseroFeedback(
 		whenReady: () => runtime.whenReady(),
 		notifyShadowMount: root => {
 			if (destroyed) return
-			// Same signal the widget fires for its own shadow root. The
-			// session-replay plugin listens on window and re-takes a full
-			// snapshot so rrweb walks into (and starts observing) the newly
-			// attached shadow tree.
+			// Same signal the widget fires for its own shadow root. Recording needs no help: rrweb observes
+			// an open shadow root whether it is attached before or after the host joins the DOM.
 			try {
 				window.dispatchEvent(
 					new CustomEvent('usero:shadow-update', {
