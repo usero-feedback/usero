@@ -146,7 +146,10 @@ export function isBeaconAvailable(): boolean {
 export function tryBeaconChunk(apiUrl: string, sessionId: string, index: number, blob: Blob): boolean {
 	if (!isBeaconAvailable()) return false
 	try {
-		return navigator.sendBeacon(chunkUrl(apiUrl, sessionId, index), blob)
+		// text/plain skips the preflight a credentialed beacon fails (Allow-Headers `*` is literal
+		// with credentials), which dropped the chunk while sendBeacon still returned true. The server stores audio/webm.
+		const body = new Blob([blob], { type: 'text/plain' })
+		return navigator.sendBeacon(chunkUrl(apiUrl, sessionId, index), body)
 	} catch {
 		return false
 	}
@@ -263,10 +266,12 @@ function enqueueChunk(store: RecorderStore, ctx: PluginContext, blob: Blob): voi
 	// still advances so the next leg continues the index. When the beacon is
 	// refused (no support, over the body cap), fall through to the fetch queue
 	// with keepalive forced on.
-	if (store.unloading && tryBeaconChunk(apiUrl, sessionId, index, blob)) {
-		ctx.logger.info(`chunk ${index} handed to sendBeacon on unload`)
+	const viaBeacon = store.unloading || store.hideFlushPending
+	store.hideFlushPending = false
+	if (viaBeacon && tryBeaconChunk(apiUrl, sessionId, index, blob)) {
+		ctx.logger.info(`chunk ${index} handed to sendBeacon on ${store.unloading ? 'unload' : 'hide'}`)
 		store.chunkIndex += 1
-		persistActiveSession(store, 'paused')
+		persistActiveSession(store, persistStatus(store))
 		return
 	}
 	const unloading = store.unloading
@@ -303,7 +308,44 @@ function enqueueChunk(store: RecorderStore, ctx: PluginContext, blob: Blob): voi
 	// can never advance past a chunk that was never queued. A 'paused' write
 	// keeps pausedAt and the RESUME_MAX_IDLE_MS idle gate; an 'active' write
 	// here would clobber pausedAt.
-	persistActiveSession(store, store.paused || store.finishFlowRan ? 'paused' : 'active')
+	persistActiveSession(store, persistStatus(store))
+}
+
+// A hidden tab persists 'paused' too, so a tab killed in the background keeps the idle gate.
+export function persistStatus(store: RecorderStore): 'active' | 'paused' {
+	return store.paused || store.hidden || store.finishFlowRan ? 'paused' : 'active'
+}
+
+// Pure: does the mic need a restart on return? True when the recorder stopped or a track ended or went system-muted.
+export function needsMicRestart(recorderState: RecordingState | null, tracks: ReadonlyArray<Pick<MediaStreamTrack, 'readyState' | 'muted'>>): boolean {
+	if (recorderState === null || recorderState === 'inactive') return true
+	if (tracks.length === 0) return true
+	return tracks.some(t => t.readyState === 'ended' || t.muted)
+}
+
+// iOS can report a live track as muted for a moment at visibilitychange; wait this long for `unmute`.
+export const MIC_UNMUTE_GRACE_MS = 1000
+
+// The recorder and tracks are alive and the only problem is a muted track.
+export function onlyMicMuted(recorderState: RecordingState | null, tracks: ReadonlyArray<Pick<MediaStreamTrack, 'readyState' | 'muted'>>): boolean {
+	if (recorderState === null || recorderState === 'inactive' || tracks.length === 0) return false
+	return tracks.every(t => t.readyState !== 'ended') && tracks.some(t => t.muted)
+}
+
+// Resolves on the first track `unmute` or after `ms`, whichever comes first.
+export function waitForUnmute(tracks: ReadonlyArray<MediaStreamTrack>, ms: number): Promise<void> {
+	return new Promise(resolve => {
+		let timer: ReturnType<typeof setTimeout> | null = null
+		const finish = (): void => {
+			if (timer === null) return
+			clearTimeout(timer)
+			timer = null
+			for (const t of tracks) t.removeEventListener('unmute', finish)
+			resolve()
+		}
+		timer = setTimeout(finish, ms)
+		for (const t of tracks) t.addEventListener('unmute', finish)
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -445,7 +487,8 @@ function watchMicDevice(store: RecorderStore, ctx: PluginContext, stream: MediaS
 	const reacquire = (): void => {
 		if (store.cancelled || store.sessionClosed) return
 		if (store.finishFlowRan || store.indicatorState === 'finishing' || store.indicatorState === 'done') return
-		if (store.paused || store.unloading) return
+		// While hidden, iOS mutes or ends the track by design; the visible handler restarts it.
+		if (store.paused || store.unloading || store.hidden) return
 		if (store.muted) return
 		if (!store.sessionId || !store.recorder || store.recorder.state === 'inactive') return
 		const now = Date.now()
@@ -505,18 +548,12 @@ function watchMicDevice(store: RecorderStore, ctx: PluginContext, stream: MediaS
 export async function startRecording(store: RecorderStore, ctx: PluginContext): Promise<void> {
 	// Re-entrant: the failed chip re-invokes this to retry. Reset to the
 	// pending state so the chip shows "connecting" again during the attempt.
+	// A live recorder is flushed and stopped first so two never run at once.
+	if (store.recorder || store.stream) stopRecording(store)
 	store.micAcquiring = true
 	store.micFailReason = null
-	// A retry tears down a prior monitor and clears the silent flag so the
-	// fresh attempt starts from a clean state.
-	if (store.silenceMonitor) {
-		store.silenceMonitor.stop()
-		store.silenceMonitor = null
-	}
-	if (store.micWatcherCleanup) {
-		store.micWatcherCleanup()
-		store.micWatcherCleanup = null
-	}
+	// hasMicPermission means "audio is live", so the chip never says Recording mid-acquire.
+	store.hasMicPermission = false
 	store.micSilent = false
 	renderIndicatorState(store)
 	if (!isMediaRecorderSupported()) {
@@ -533,17 +570,26 @@ export async function startRecording(store: RecorderStore, ctx: PluginContext): 
 	} catch (err) {
 		ctx.logger.warn('mic permission denied or unavailable', err)
 		store.micAcquiring = false
-		// Distinguish denied (blocked) from no-device (not-found) for copy.
-		const name = err instanceof Error ? err.name : ''
-		store.micFailReason = name === 'NotFoundError' || name === 'DevicesNotFoundError' ? 'not-found' : 'blocked'
+		store.micFailReason = micFailReasonFromError(err)
 		store.indicatorState = 'no-audio'
 		renderIndicatorState(store)
+		return
+	}
+	// Torn down (Finish, destroy, session closed) while the prompt was open: release the mic.
+	if (store.cancelled || store.sessionClosed || store.finishFlowRan) {
+		stream.getTracks().forEach(t => t.stop())
+		store.micAcquiring = false
 		return
 	}
 	store.stream = stream
 	store.hasMicPermission = true
 	store.micAcquiring = false
 	store.micFailReason = null
+	// A restart while the participant is muted stays muted, and reopens the segment pauseFlow closed.
+	if (store.muted) {
+		for (const t of stream.getAudioTracks()) t.enabled = false
+		store.mutedSinceMs ??= Date.now() - store.startedAt
+	}
 	const mimeType = pickMimeType()
 	let recorder: MediaRecorder
 	try {
@@ -609,6 +655,14 @@ export async function startRecording(store: RecorderStore, ctx: PluginContext): 
 	// headset): re-acquire on device-level signals. Warn-only silence guard
 	// above is untouched. Torn down by stopRecording.
 	store.micWatcherCleanup = watchMicDevice(store, ctx, stream)
+}
+
+// Denied (blocked) vs no device (not-found) vs a device that would not start (stopped), for chip copy.
+export function micFailReasonFromError(err: unknown): 'blocked' | 'not-found' | 'stopped' {
+	const name = err instanceof Error || (typeof DOMException !== 'undefined' && err instanceof DOMException) ? err.name : ''
+	if (name === 'NotFoundError' || name === 'DevicesNotFoundError') return 'not-found'
+	if (name === 'NotReadableError' || name === 'TrackStartError' || name === 'AbortError') return 'stopped'
+	return 'blocked'
 }
 
 export function toggleMute(store: RecorderStore): boolean {

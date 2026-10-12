@@ -152,30 +152,32 @@ export interface ConsentPromptOptions {
 	timeoutMs?: number
 }
 
-// Shows the consent prompt and resolves with the user's choice.
+// How the prompt ended. Escape counts as 'declined'; a prompt that cannot render is 'failed'.
+export type ConsentAnswer = 'included' | 'declined' | 'timeout' | 'failed'
+
+// Shows the consent prompt and resolves with the user's answer.
 //
-// Resolves `false` (decline) on timeout, on Escape, and on any failure to
-// render. Callers MUST treat a `false` as "capture nothing": the whole
-// point of asking first is that a declined snapshot is never taken, so
-// there is never a copy of it to leak.
+// Anything but 'included' means "capture nothing": the whole point of
+// asking first is that a declined snapshot is never taken, so there is
+// never a copy of it to leak.
 //
 // The prompt lives in its own shadow root on a host marked
 // `data-usero-block`, so host page CSS cannot restyle it and any recorder
 // running elsewhere on the page skips the subtree. The host is removed
 // from the DOM BEFORE the promise resolves, so a snapshot taken by the
 // caller can never contain our own prompt.
-export function requestSessionContextConsent(options: ConsentPromptOptions): Promise<boolean> {
+export function requestSessionContextConsent(options: ConsentPromptOptions): Promise<ConsentAnswer> {
 	const { logger } = options
 	const timeoutMs = options.timeoutMs ?? SESSION_CONTEXT_CONSENT_TIMEOUT_MS
-	if (typeof document === 'undefined' || !document.body) return Promise.resolve(false)
+	if (typeof document === 'undefined' || !document.body) return Promise.resolve('failed')
 
-	return new Promise<boolean>(resolve => {
+	return new Promise<ConsentAnswer>(resolve => {
 		let settled = false
 		let host: HTMLElement | null = null
 		let timer: ReturnType<typeof setTimeout> | null = null
 		let keydownHandler: ((event: KeyboardEvent) => void) | null = null
 
-		const finish = (consented: boolean): void => {
+		const finish = (answer: ConsentAnswer): void => {
 			if (settled) return
 			settled = true
 			if (timer !== null) clearTimeout(timer)
@@ -196,7 +198,7 @@ export function requestSessionContextConsent(options: ConsentPromptOptions): Pro
 				}
 				host = null
 			}
-			resolve(consented)
+			resolve(answer)
 		}
 
 		try {
@@ -229,13 +231,13 @@ export function requestSessionContextConsent(options: ConsentPromptOptions): Pro
 			declineButton.type = 'button'
 			declineButton.className = 'decline'
 			declineButton.textContent = SESSION_CONTEXT_CONSENT_COPY.declineLabel
-			declineButton.addEventListener('click', () => finish(false))
+			declineButton.addEventListener('click', () => finish('declined'))
 
 			const includeButton = document.createElement('button')
 			includeButton.type = 'button'
 			includeButton.className = 'include'
 			includeButton.textContent = SESSION_CONTEXT_CONSENT_COPY.includeLabel
-			includeButton.addEventListener('click', () => finish(true))
+			includeButton.addEventListener('click', () => finish('included'))
 
 			actions.appendChild(declineButton)
 			actions.appendChild(includeButton)
@@ -248,7 +250,7 @@ export function requestSessionContextConsent(options: ConsentPromptOptions): Pro
 			// Escape declines. Captured so a host page key handler cannot
 			// swallow it first.
 			keydownHandler = (event: KeyboardEvent): void => {
-				if (event.key === 'Escape') finish(false)
+				if (event.key === 'Escape') finish('declined')
 			}
 			document.addEventListener('keydown', keydownHandler, true)
 
@@ -259,10 +261,10 @@ export function requestSessionContextConsent(options: ConsentPromptOptions): Pro
 			}
 		} catch (err) {
 			logger.warn('Ask first prompt failed to render', err)
-			finish(false)
+			finish('failed')
 			return
 		}
 
-		timer = setTimeout(() => finish(false), timeoutMs)
+		timer = setTimeout(() => finish('timeout'), timeoutMs)
 	})
 }

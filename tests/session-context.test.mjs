@@ -131,11 +131,18 @@ globalThis.localStorage = localStorage
 let calls = []
 let configMode = 'always'
 let configFetchFails = false
+let createFails = false
 let nextSessionId = 0
 
 globalThis.fetch = async (url, init = {}) => {
 	const href = String(url)
-	calls.push({ url: href, method: init.method ?? 'GET', body: init.body })
+	calls.push({
+		url: href,
+		method: init.method ?? 'GET',
+		body: init.body,
+		keepalive: init.keepalive,
+		contentType: init.headers?.['Content-Type'],
+	})
 	if (href.includes('/api/feedback?')) {
 		if (configFetchFails) throw new Error('network down')
 		return new Response(
@@ -147,6 +154,7 @@ globalThis.fetch = async (url, init = {}) => {
 		)
 	}
 	if (href.endsWith('/api/replay-sessions')) {
+		if (createFails) throw new Error('network down')
 		nextSessionId += 1
 		return new Response(
 			JSON.stringify({ accepted: true, sessionReplayId: `session-${nextSessionId}` }),
@@ -243,6 +251,7 @@ beforeEach(() => {
 	body.children = []
 	configMode = 'always'
 	configFetchFails = false
+	createFails = false
 	nextSessionId = 0
 	// Recording is page-scoped through a globalThis slot. Tests share one
 	// process, so a recording left live by an earlier test would be adopted
@@ -414,8 +423,10 @@ async function waitFor(condition, ms = 1000) {
 }
 
 const finaliseCalls = () => calls.filter(c => c.url.includes('/finalise'))
+const noSnapshotBodies = () =>
+	calls.filter(c => c.method === 'POST' && c.url.endsWith('/api/replay-sessions/no-snapshot')).map(c => JSON.parse(c.body))
 
-test('ask plus decline: nothing is captured and nothing is transmitted', async () => {
+test('ask plus decline: nothing is captured, only a declined signal is sent', async () => {
 	configMode = 'ask'
 	const plugin = sessionReplay()
 	const ctx = makeContext()
@@ -430,12 +441,73 @@ test('ask plus decline: nothing is captured and nothing is transmitted', async (
 	await delay(30)
 
 	assert.equal(loads, 0, 'the page was never captured, so there is nothing to discard')
-	assert.equal(calls.length, callsBefore, 'not one byte about the page left the browser')
+	assert.deepEqual(
+		calls.slice(callsBefore).map(c => c.url),
+		['https://api.example/api/replay-sessions/no-snapshot'],
+		'not one byte about the page left the browser, only the no-snapshot signal',
+	)
+	assert.deepEqual(noSnapshotBodies(), [
+		{ clientId: 'client-abc', feedbackId: 'fb-1', linkToken: 'link-token-1', reason: 'declined' },
+	])
 	assert.equal(body.children.length, 0, 'the prompt cleans itself up')
 	plugin.onDestroy(ctx)
 })
 
-test('ask plus Escape declines, and still transmits nothing', async () => {
+test('ask with no answer times out: no capture, and the server hears timeout', async () => {
+	configMode = 'ask'
+	__test__.setConsentTimeoutMs(30)
+	try {
+		const plugin = sessionReplay()
+		const ctx = makeContext()
+		plugin.onInit(ctx)
+		await delay(40)
+		submitAndAfter(plugin, ctx)
+		assert.ok(await waitFor(() => noSnapshotBodies().length === 1), 'signal sent after the timeout')
+		assert.equal(noSnapshotBodies()[0].reason, 'timeout')
+		assert.equal(loads, 0, 'nothing captured')
+		assert.equal(createCalls().length, 0)
+		plugin.onDestroy(ctx)
+	} finally {
+		__test__.setConsentTimeoutMs(undefined)
+	}
+})
+
+test('rrweb fails to load: the server hears failed', async () => {
+	configMode = 'always'
+	__test__.setRrwebLoader(async () => null)
+	const plugin = sessionReplay({ sampleRate: 0 })
+	const ctx = makeContext()
+	plugin.onInit(ctx)
+	await delay(40)
+	submitAndAfter(plugin, ctx)
+	assert.ok(await waitFor(() => noSnapshotBodies().length === 1))
+	assert.equal(noSnapshotBodies()[0].reason, 'failed')
+	assert.equal(createCalls().length, 0)
+	plugin.onDestroy(ctx)
+})
+
+test('the snapshot create fails: the server hears failed', async () => {
+	configMode = 'always'
+	createFails = true
+	const plugin = sessionReplay({ sampleRate: 0 })
+	const ctx = makeContext()
+	plugin.onInit(ctx)
+	await delay(40)
+	submitAndAfter(plugin, ctx)
+	assert.ok(await waitFor(() => noSnapshotBodies().length === 1))
+	assert.deepEqual(noSnapshotBodies()[0], {
+		clientId: 'client-abc',
+		feedbackId: 'fb-1',
+		linkToken: 'link-token-1',
+		reason: 'failed',
+	})
+	const signal = calls.find(c => c.url.endsWith('/no-snapshot'))
+	assert.equal(signal.keepalive, true, 'the signal outlives a navigation')
+	assert.equal(signal.contentType, 'text/plain', 'a simple request, no preflight')
+	plugin.onDestroy(ctx)
+})
+
+test('ask plus Escape declines: nothing about the page is transmitted', async () => {
 	configMode = 'ask'
 	const plugin = sessionReplay()
 	const ctx = makeContext()
@@ -446,10 +518,11 @@ test('ask plus Escape declines, and still transmits nothing', async () => {
 	submitAndAfter(plugin, ctx)
 	assert.ok(await waitFor(() => findButton('Include') !== undefined), 'prompt rendered')
 	for (const fn of documentListeners.keydown ?? []) fn({ key: 'Escape' })
-	await delay(30)
+	assert.ok(await waitFor(() => noSnapshotBodies().length === 1))
 
 	assert.equal(loads, 0, 'nothing captured')
-	assert.equal(calls.length, callsBefore, 'nothing transmitted')
+	assert.equal(calls.length, callsBefore + 1, 'nothing transmitted but the no-snapshot signal')
+	assert.equal(noSnapshotBodies()[0].reason, 'declined', 'Escape counts as a decline')
 	assert.equal(body.children.length, 0, 'the prompt is torn down')
 	plugin.onDestroy(ctx)
 })
@@ -495,6 +568,7 @@ test('ask plus accept: one snapshot-only session, one chunk, one finalise', asyn
 	const finalises = calls.filter(c => c.url.includes('/finalise'))
 	assert.equal(finalises.length, 1)
 	assert.equal(loads, 1, 'rrweb loaded only after consent')
+	assert.equal(noSnapshotBodies().length, 0, 'a linked snapshot sends no no-snapshot signal')
 	plugin.onDestroy(ctx)
 })
 

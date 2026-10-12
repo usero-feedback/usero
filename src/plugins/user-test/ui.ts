@@ -792,7 +792,7 @@ export function renderIndicatorState(store: RecorderStore): void {
 			// mic after switching their input device. Auto-clears when real audio
 			// returns (the monitor flips store.micSilent back to false).
 			micIcon.innerHTML = MIC_MUTED_ICON_SVG
-			micLabel.textContent = "We can't hear you, tap to recheck"
+			micLabel.textContent = "Can't hear you, tap to recheck"
 			mic.setAttribute('aria-label', "We can't hear your microphone. Check your input device, then tap to recheck. Recording continues.")
 			mic.setAttribute('aria-pressed', 'false')
 			mic.removeAttribute('tabindex')
@@ -804,11 +804,12 @@ export function renderIndicatorState(store: RecorderStore): void {
 			micIcon.innerHTML = MIC_MUTED_ICON_SVG
 			const failLabel =
 				store.micFailReason === 'not-found' ? 'No mic found, tap to retry' :
+				store.micFailReason === 'stopped' ? 'Mic stopped, tap to resume' :
 				'Mic blocked, tap to retry'
 			const failAria =
-				store.micFailReason === 'not-found'
-					? 'No microphone found, tap to retry. Replay continues.'
-					: 'Microphone blocked, tap to retry. Replay continues.'
+				store.micFailReason === 'not-found' ? 'No microphone found, tap to retry. Replay continues.' :
+				store.micFailReason === 'stopped' ? 'Microphone stopped, tap to resume. Replay continues.' :
+				'Microphone blocked, tap to retry. Replay continues.'
 			micLabel.textContent = failLabel
 			mic.setAttribute('aria-label', failAria)
 			mic.setAttribute('aria-pressed', 'false')

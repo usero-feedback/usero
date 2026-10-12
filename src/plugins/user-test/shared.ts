@@ -57,7 +57,8 @@ export interface RecorderStore {
 	indicator: HTMLElement | null
 	indicatorRoot: ShadowRoot | null
 	indicatorState: 'recording' | 'finishing' | 'done' | 'no-audio' | 'error'
-	pageHideHandler: (() => void) | null
+	pageHideHandler: ((event: PageTransitionEvent) => void) | null
+	pageShowHandler: ((event: PageTransitionEvent) => void) | null
 	visibilityHandler: (() => void) | null
 	options: Required<UserTestOptions>
 	tasks: UserTestTask[]
@@ -78,8 +79,9 @@ export interface RecorderStore {
 	// Why mic acquisition failed, for actionable terminal copy. 'blocked' =
 	// permission denied (NotAllowedError), 'not-found' = no device
 	// (NotFoundError), 'unsupported' = MediaRecorder/getUserMedia missing or
-	// constructor threw. Null while acquiring or once granted.
-	micFailReason: 'blocked' | 'not-found' | 'unsupported' | null
+	// constructor threw, 'stopped' = the device would not restart (in use, aborted).
+	// Null while acquiring or once granted.
+	micFailReason: 'blocked' | 'not-found' | 'unsupported' | 'stopped' | null
 	muted: boolean
 	mutedSinceMs: number | null
 	mutedSegments: MutedSegment[]
@@ -122,18 +124,23 @@ export interface RecorderStore {
 	// clears the persisted resume state, and shows the "session ended" screen.
 	// Null until the entry module wires it (and when there's nothing to close).
 	onSessionClosed: (() => void) | null
-	// True once pauseFlow has run for a hard navigation (page hidden mid-test).
+	// True once pauseFlow has run for a hard navigation or bfcache entry (pagehide mid-test).
 	// Set BEFORE stopRecording() so the final trailing `dataavailable` chunk that
 	// stopRecording triggers persists as 'paused' (keeping pausedAt), not 'active'.
 	// Without this the trailing enqueueChunk rewrote the entry to 'active' and
 	// dropped pausedAt, defeating the RESUME_MAX_IDLE_MS idle gate. Reset to false
-	// on a successful resume (the recorder is live again).
+	// by a fresh document or a bfcache restore (onPageVisible).
 	paused: boolean
-	// True while the page is unloading mid-test (pauseFlow ran from pagehide /
-	// hidden). Routes the trailing chunk through sendBeacon first, with the
+	// True while the page is unloading mid-test (pauseFlow ran from pagehide).
+	// Routes the trailing chunk through sendBeacon first, with the
 	// fetch fallback forced onto keepalive. Fresh documents start false; only
 	// pauseFlow ever sets it, so a normal Finish never takes the beacon path.
 	unloading: boolean
+	// True while the tab is hidden (visibilitychange). The recorder keeps going;
+	// chunks persist as 'paused' so a tab killed in the background keeps the idle gate.
+	hidden: boolean
+	// One-shot: the chunk flushed on hide goes by sendBeacon, in case the tab is frozen or killed.
+	hideFlushPending: boolean
 	// True when this store was rehydrated from persisted localStorage state
 	// (a resume across a hard navigation) rather than a fresh start. Lets the
 	// init path skip session creation/adoption and continue the chunk index.

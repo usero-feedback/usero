@@ -41,7 +41,7 @@ test('isBeaconAvailable is false when sendBeacon is missing', () => {
 	}
 })
 
-test('tryBeaconChunk POSTs the blob to the indexed chunk URL and returns true', () => {
+test('tryBeaconChunk POSTs the blob to the indexed chunk URL and returns true', async () => {
 	const orig = globalThis.navigator
 	const calls = []
 	globalThis.navigator = {
@@ -55,7 +55,10 @@ test('tryBeaconChunk POSTs the blob to the indexed chunk URL and returns true', 
 		assert.equal(tryBeaconChunk('https://usero.io', 'sess1', 7, blob), true)
 		assert.equal(calls.length, 1)
 		assert.equal(calls[0][0], 'https://usero.io/api/user-test-sessions/sess1/chunk?index=7')
-		assert.equal(calls[0][1], blob)
+		// text/plain so the credentialed beacon needs no CORS preflight; same bytes.
+		assert.equal(calls[0][1].type, 'text/plain')
+		assert.equal(calls[0][1].size, blob.size)
+		assert.equal(await calls[0][1].text(), 'audio-bytes')
 	} finally {
 		if (orig !== undefined) globalThis.navigator = orig
 		else delete globalThis.navigator

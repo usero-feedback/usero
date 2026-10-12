@@ -230,7 +230,11 @@ test('a busy hidden tab still uploads once a batch reaches chunkMaxEvents, merge
 	const id = await liveSessionId()
 	assert.ok(await waitFor(() => chunksFor(id).length > 0))
 	hide()
-	await delay(30)
+	// A busy lane merges the next batches into one chunk (by design), so start the burst only once the
+	// hide flush has fully landed; a fixed delay lost that race about 1 run in 4 under load.
+	const store = globalThis.__useroSessionReplayActive__?.store
+	assert.ok(store, 'live store')
+	assert.ok(await waitFor(() => !store.uploadLaneRunning && inFlight === 0), 'hide flush landed')
 	const atHide = chunksFor(id).length
 	for (let i = 0; i < 45; i += 1) userActs()
 	assert.ok(await waitFor(() => chunksFor(id).length >= atHide + 2), 'two full batches went out while hidden')

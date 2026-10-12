@@ -1,18 +1,28 @@
 // Pause + finish orchestration for the user-test plugin. pauseFlow handles a
-// hard navigation (pagehide / tab hidden) by stopping the recorder WITHOUT
-// finalising so the session can resume on return; finishFlow is the real
+// hard navigation (pagehide) by stopping the recorder WITHOUT finalising so the
+// session can resume on return; onPageHidden / onPageVisible keep the recorder
+// running across a tab switch and restart the mic only if it died; finishFlow is the real
 // terminal path (explicit Finish tap) that drains uploads, finalises
 // server-side, and renders the thanks screen. Both tie together the recorder,
 // session, and ui modules.
 
 import type { PluginContext } from '../../plugin'
-import { flushMuteIfActive, flushPendingFromIdb, startRecording, stopRecording } from './recorder'
+import {
+	flushMuteIfActive,
+	flushPendingFromIdb,
+	MIC_UNMUTE_GRACE_MS,
+	needsMicRestart,
+	onlyMicMuted,
+	startRecording,
+	stopRecording,
+	waitForUnmute,
+} from './recorder'
 import { clearActiveSession, finaliseSession, persistActiveSession, postPayout } from './session'
 import { computeReplayOffsetMs, type PaymentSummary, type RecorderStore } from './shared'
-import { renderIndicatorState, showThanksScreen } from './ui'
+import { renderIndicatorState, showResumedToast, showThanksScreen } from './ui'
 
-// Pause the recording for a hard navigation (pagehide / tab hidden) WITHOUT
-// finalising. The browser is about to tear down the MediaStream, so we stop the
+// Pause the recording for a hard navigation or a back-forward cache entry (pagehide)
+// WITHOUT finalising. The browser is about to tear down the MediaStream, so we stop the
 // recorder and let its queued chunk uploads race the unload on `keepalive`. The
 // session stays open server-side; it resumes on return (storage carries the
 // resume pointer), or the server-side stale sweep finalises it after ~10 min if
@@ -43,6 +53,74 @@ export function pauseFlow(store: RecorderStore): void {
 	// uploads (each `keepalive` where small enough) continue draining as the
 	// page unloads; the resume picks up from store.chunkIndex.
 	persistActiveSession(store, 'paused')
+}
+
+function isTerminal(store: RecorderStore): boolean {
+	return store.cancelled || store.sessionClosed || store.finishFlowRan || store.indicatorState === 'finishing' || store.indicatorState === 'done' || store.indicatorState === 'error'
+}
+
+// Tab hidden: flush what is buffered (by beacon, in case the tab is frozen or killed) and keep recording.
+export function onPageHidden(store: RecorderStore): void {
+	if (store.hidden || isTerminal(store) || !store.sessionId) return
+	store.hidden = true
+	const recorder = store.recorder
+	if (recorder && recorder.state === 'recording') {
+		store.hideFlushPending = true
+		try {
+			recorder.requestData()
+		} catch {
+			store.hideFlushPending = false
+		}
+	}
+	persistActiveSession(store, 'paused')
+}
+
+// Tab visible again (or restored from the back-forward cache). No work unless the mic actually stopped.
+export async function onPageVisible(store: RecorderStore, ctx: PluginContext): Promise<void> {
+	store.hidden = false
+	store.hideFlushPending = false
+	if (isTerminal(store) || !store.sessionId || store.micAcquiring) return
+	const wasPaused = store.paused
+	store.paused = false
+	store.unloading = false
+	const recorder = store.recorder
+	const tracks = store.stream ? store.stream.getAudioTracks() : []
+	// A denied or absent mic stays failed until the chip is tapped, even after a bfcache restore: no surprise prompt.
+	if (store.micFailReason === 'blocked' || store.micFailReason === 'not-found') {
+		persistActiveSession(store, 'active')
+		return
+	}
+	// The mic had already failed before the hide: the chip still shows that, nothing to restart.
+	if (!wasPaused && !recorder && !store.hasMicPermission) {
+		persistActiveSession(store, 'active')
+		return
+	}
+	if (!wasPaused && recorder && !needsMicRestart(recorder.state, tracks)) {
+		keepRecording(store, recorder)
+		return
+	}
+	// A track muted only for a moment (iOS at visibilitychange) is not worth a restart and a toast.
+	if (!wasPaused && recorder && onlyMicMuted(recorder.state, tracks)) {
+		await waitForUnmute(tracks, MIC_UNMUTE_GRACE_MS)
+		if (isTerminal(store) || store.hidden || store.micAcquiring || store.recorder !== recorder) return
+		if (!needsMicRestart(recorder.state, tracks)) {
+			keepRecording(store, recorder)
+			return
+		}
+	}
+	ctx.logger.warn('mic stopped while the tab was hidden, restarting')
+	persistActiveSession(store, 'active')
+	store.lastMicReacquireAt = Date.now()
+	store.resumed = true
+	await startRecording(store, ctx)
+	showResumedToast(store)
+}
+
+function keepRecording(store: RecorderStore, recorder: MediaRecorder): void {
+	if (recorder.state === 'paused') {
+		try { recorder.resume() } catch { /* restarts on the next device signal */ }
+	}
+	persistActiveSession(store, 'active')
 }
 
 export async function finishFlow(store: RecorderStore, ctx: PluginContext, opts: { showThanks: boolean }): Promise<void> {

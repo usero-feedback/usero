@@ -12,9 +12,13 @@
 //   4. On Finish, flushes any buffered chunks and calls
 //      POST /api/user-test-sessions/:id/finalise.
 //
-// Resume across hard navigations: `pagehide` / `visibilitychange -> hidden` now
-// PAUSE rather than finalise. The recorder stops and queued chunks drain on
-// `keepalive`, but the session stays open server-side. Resume state
+// Tab switches: `visibilitychange -> hidden` only flushes the buffered audio (by
+// beacon) and keeps recording. On return, the mic is restarted only if the
+// browser ended or muted the track, and the indicator shows a failed restart.
+//
+// Resume across hard navigations: `pagehide` PAUSES rather than finalises. The
+// recorder stops and queued chunks drain on `keepalive`, but the session stays
+// open server-side (a back-forward cache restore restarts it on `pageshow`). Resume state
 // ({ slug, sessionId, nextChunkIndex, startedAt }) is persisted per-origin in
 // localStorage (`usero:user-test:active-session`). On init, a non-stale entry
 // (< 2h old) makes the plugin re-adopt that session and continue recording from
@@ -47,14 +51,19 @@
 
 import type { UseroPlugin } from '../plugin'
 import { DEFAULT_API_URL } from '../types'
-import { finishFlow, pauseFlow } from './user-test/lifecycle'
+import { finishFlow, onPageHidden, onPageVisible, pauseFlow } from './user-test/lifecycle'
 import {
 	classifyChunkResponse,
 	chunkUrl,
+	flushMuteIfActive,
 	handleSessionClosed,
 	isBeaconAvailable,
 	isMediaRecorderSupported,
 	isStreamSilent,
+	micFailReasonFromError,
+	needsMicRestart,
+	onlyMicMuted,
+	persistStatus,
 	pickMimeType,
 	rmsDbFromSamples,
 	shouldReacquireMic,
@@ -178,6 +187,7 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				indicatorRoot: null,
 				indicatorState: 'recording',
 				pageHideHandler: null,
+				pageShowHandler: null,
 				visibilityHandler: null,
 				options: { ...merged, apiUrl },
 				tasks: [],
@@ -207,6 +217,8 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				onSessionClosed: null,
 			paused: false,
 			unloading: false,
+			hidden: false,
+			hideFlushPending: false,
 			resumed: isResume,
 				sdkSessionId: null,
 				// On resume, keep the original epochs so the offset stays anchored to
@@ -345,25 +357,26 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 
 			const pageHide = (): void => {
 				// PAUSE, do not finalise. A hard navigation (e.g. an OAuth round
-				// trip) destroys the MediaStream, but the session must survive so
-				// recording resumes on return. We stop the recorder, mark the
-				// persisted state paused, and let queued chunk uploads race the
-				// unload on `keepalive`. Finalisation now comes only from an
-				// explicit Finish tap or the server-side stale sweep (~10 min of
-				// no chunks). See pauseFlow.
+				// trip) or a back-forward cache entry destroys the MediaStream, but
+				// the session must survive so recording resumes on return. We stop
+				// the recorder, mark the persisted state paused, and let queued chunk
+				// uploads race the unload on `keepalive`. Finalisation comes only from
+				// an explicit Finish tap or the server-side stale sweep. See pauseFlow.
 				pauseFlow(store)
 			}
 			store.pageHideHandler = pageHide
 			window.addEventListener('pagehide', pageHide)
+			const pageShow = (event: PageTransitionEvent): void => {
+				if (event.persisted) void onPageVisible(store, ctx)
+			}
+			store.pageShowHandler = pageShow
+			window.addEventListener('pageshow', pageShow)
 
-			// visibilitychange -> hidden is the reliable mobile backstop: iOS
-			// frequently backgrounds/kills a tab WITHOUT firing pagehide. It runs
-			// the SAME pause path; pauseFlow is idempotent and non-terminal, so a
-			// later Finish tap (or a resume) still works after the tab returns to
-			// the foreground. We don't finalise here either, for the same reason.
+			// A tab switch keeps recording: hidden flushes (iOS can kill a
+			// background tab without pagehide), visible restarts only a dead mic.
 			const onVisibilityChange = (): void => {
-				if (document.visibilityState !== 'hidden') return
-				pauseFlow(store)
+				if (document.visibilityState === 'hidden') onPageHidden(store)
+				else void onPageVisible(store, ctx)
 			}
 			store.visibilityHandler = onVisibilityChange
 			document.addEventListener('visibilitychange', onVisibilityChange)
@@ -470,6 +483,10 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				window.removeEventListener('pagehide', store.pageHideHandler)
 				store.pageHideHandler = null
 			}
+			if (store.pageShowHandler) {
+				window.removeEventListener('pageshow', store.pageShowHandler)
+				store.pageShowHandler = null
+			}
 			if (store.visibilityHandler) {
 				document.removeEventListener('visibilitychange', store.visibilityHandler)
 				store.visibilityHandler = null
@@ -531,4 +548,13 @@ export const __test__ = {
 	RESUME_MAX_IDLE_MS,
 	ACTIVE_SESSION_STORAGE_KEY,
 	computeReplayOffsetMs,
+	onPageHidden,
+	onPageVisible,
+	pauseFlow,
+	needsMicRestart,
+	persistStatus,
+	micFailReasonFromError,
+	micStart: startRecording,
+	flushMuteIfActive,
+	onlyMicMuted,
 }

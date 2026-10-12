@@ -582,6 +582,8 @@ async function uploadChunk(
 // have, so tests swap in a fake recorder here to exercise the snapshot
 // path. Always null in production; only `__test__.setRrwebLoader` sets it.
 let rrwebLoaderOverride: (() => Promise<RrwebRecord | null>) | null = null
+// Ask first prompt timeout; undefined (the default) in production, `__test__.setConsentTimeoutMs` shortens it.
+let consentTimeoutOverrideMs: number | undefined
 
 async function loadRrwebRecord(): Promise<RrwebRecord | null> {
 	if (rrwebLoaderOverride) return rrwebLoaderOverride()
@@ -1127,6 +1129,28 @@ async function postFinalise(
 	}
 }
 
+// Why a submit-time snapshot will not come. Escape on the Ask first prompt is 'declined'.
+type NoSnapshotReason = 'declined' | 'timeout' | 'failed'
+
+// Tells the server no snapshot is coming, so the feedback page stops waiting for one. text/plain keeps
+// it a simple request (no preflight) and keepalive lets it outlive a navigation. Never rejects.
+async function postNoSnapshot(
+	params: { apiUrl: string; clientId: string; feedbackId: string; linkToken: string },
+	reason: NoSnapshotReason,
+	logger: PluginLogger,
+): Promise<void> {
+	try {
+		await fetch(joinUrl(params.apiUrl, '/api/replay-sessions/no-snapshot'), {
+			method: 'POST',
+			headers: { 'Content-Type': 'text/plain' },
+			body: JSON.stringify({ clientId: params.clientId, feedbackId: params.feedbackId, linkToken: params.linkToken, reason }),
+			keepalive: true,
+		})
+	} catch (err) {
+		logger.warn('no-snapshot signal failed', err)
+	}
+}
+
 function finalise(store: ReplayStore, ctx: PluginContext, opts: { useBeacon: boolean }): void {
 	if (!store.sessionReplayId) return
 	// Chunks go out before the finalise beacon; the server accepts stragglers for a grace window.
@@ -1532,7 +1556,8 @@ export function sessionReplay(options: SessionReplayOptions = {}): SessionReplay
 	// for the feedback id (so the success UI has rendered), let the browser
 	// paint, ask in 'ask' mode, then capture and ship a snapshot-only session
 	// that the server links to the feedback on create. A decline means no
-	// capture ever happens rather than a capture we throw away.
+	// capture ever happens rather than a capture we throw away. Whenever the
+	// snapshot will not come, the server hears why right away.
 	const snapshotAfterSubmit = async (
 		ctx: PluginContext,
 		outcome: FeedbackSubmitOutcome,
@@ -1545,13 +1570,31 @@ export function sessionReplay(options: SessionReplayOptions = {}): SessionReplay
 		])
 		// No token, no link: skip the capture rather than upload a snapshot nobody can see.
 		if (!feedbackId || !linkToken || mode === 'never') return
-		await afterNextPaint()
-		const consented =
-			mode === 'ask' ? await requestSessionContextConsent({ logger: ctx.logger }) : false
-		if (mode === 'ask') {
-			if (!consented) return
-			await afterNextPaint()
+		const link = { apiUrl, clientId: ctx.clientId, feedbackId, linkToken }
+		let missing: NoSnapshotReason | null
+		try {
+			missing = await captureAndUploadSnapshot(ctx, link, mode)
+		} catch (err) {
+			ctx.logger.warn('page snapshot failed', err)
+			missing = 'failed'
 		}
+		if (missing !== null) await postNoSnapshot(link, missing, ctx.logger)
+	}
+
+	// Returns null once the snapshot is linked, else why it will not come.
+	const captureAndUploadSnapshot = async (
+		ctx: PluginContext,
+		link: { apiUrl: string; feedbackId: string; linkToken: string },
+		mode: SessionContextMode,
+	): Promise<NoSnapshotReason | null> => {
+		await afterNextPaint()
+		const answer =
+			mode === 'ask'
+				? await requestSessionContextConsent({ logger: ctx.logger, timeoutMs: consentTimeoutOverrideMs })
+				: null
+		if (answer !== null && answer !== 'included') return answer
+		const consented = answer === 'included'
+		if (consented) await afterNextPaint()
 		const events = await captureSnapshotEvents(
 			{
 				maskAllInputs: merged.maskAllInputs,
@@ -1562,19 +1605,20 @@ export function sessionReplay(options: SessionReplayOptions = {}): SessionReplay
 			ctx.logger,
 			SNAPSHOT_CAPTURE_BUDGET_MS,
 		)
-		if (!events || events.length === 0) return
-		await uploadSnapshotSession({
-			apiUrl,
+		if (!events || events.length === 0) return 'failed'
+		const sessionReplayId = await uploadSnapshotSession({
+			apiUrl: link.apiUrl,
 			clientId: ctx.clientId,
 			sdkSessionId: ctx.getSdkSessionId ? ctx.getSdkSessionId() : mintSdkSessionId(),
 			anonymousId: ctx.getAnonymousId ? ctx.getAnonymousId() : getOrMintAnonymousId(),
 			environment: standaloneEnvironment ?? ctx.environment,
 			events,
 			consented,
-			feedbackId,
-			linkToken,
+			feedbackId: link.feedbackId,
+			linkToken: link.linkToken,
 			logger: ctx.logger,
 		})
+		return sessionReplayId === null ? 'failed' : null
 	}
 
 	// Warm rrweb when the feedback panel opens so the snapshot never pays
@@ -2028,5 +2072,8 @@ export const __test__ = {
 	// exercise the snapshot path. Pass null to restore the real loader.
 	setRrwebLoader: (fn: (() => Promise<RrwebRecord | null>) | null): void => {
 		rrwebLoaderOverride = fn
+	},
+	setConsentTimeoutMs: (ms: number | undefined): void => {
+		consentTimeoutOverrideMs = ms
 	},
 }
