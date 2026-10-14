@@ -137,8 +137,9 @@ export class FeedbackApiClient {
 		return body.screenshot
 	}
 
-	ping(): void {
-		fetch(`${this.baseUrl}/api/ping`, {
+	// clientId lets the server warm the exact Client lookup the submit runs first.
+	ping(clientId: string): void {
+		fetch(`${this.baseUrl}/api/ping?clientId=${encodeURIComponent(clientId)}`, {
 			signal: AbortSignal.timeout(5000),
 		}).catch(() => {})
 	}

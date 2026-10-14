@@ -349,7 +349,7 @@ export function initUseroFeedbackWidget(
 		submitMessage = null
 		screenshotError = null
 		isUploadingScreenshot = false
-		apiClient.ping()
+		apiClient.ping(clientId)
 		pollGetUser()
 		onOpen?.()
 		render()
