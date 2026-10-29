@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.6.4
+
+Patch. New `launcherIcon` option for the `'button'` launcher. It sets the emoji or short text shown before the label, so a "Report a bug" button can lead with 🐛 instead of 💬. The default stays 💬, and an empty string (`launcherIcon: ''`) shows the label alone. The icon is HTML-escaped, stays out of the button's accessible name (it sits in an `aria-hidden` span, as the 💬 always has), and is ignored by the `'tab'` and `'none'` launchers. It hot-swaps through `update()` and the React prop like `launcherLabel`, with no remount. No change to submit, replay or the wire format.
+
+`npm run perf` medians, 5 runs per mode (250 ms latency, 4x CPU, Playwright Chromium, mock API). The machine was under heavy load from other runs (load average about 36), which pushes the record-start long tasks over budget. Published 1.6.3, measured straight after on the same machine with `--sdk`, read live 34 / 337 / 219 ms and resume 27 / 327 / 206 ms, so this release adds nothing measurable:
+
+| Mode | Click to feedback sent | Click to success | Replay linked | Longest task at record start | Longest task on return |
+| --- | --- | --- | --- | --- | --- |
+| live recording | 28 ms | 323 ms | 5 of 5 (in the POST) | 195 ms | |
+| snapshot | 9 ms | 298 ms | 5 of 5 (at snapshot create) | | |
+| ask (Include) | 10 ms | 303 ms | 5 of 5 (at snapshot create) | | |
+| resume after app switch | 28 ms | 340 ms | 5 of 5 (in the POST, same session) | 234 ms | 0 ms |
+
 ## 1.6.3
 
 Patch. Opening the panel now warms the exact lookup the submit runs first. The warm-up ping becomes `GET /api/ping?clientId=<your clientId>`, so the server primes the indexed `Client` lookup by `clientId` instead of reading an arbitrary row, and the first submit after a cold start skips that cold query. The ping carries only the site's public `clientId`, nothing about the person, and stays a simple `GET` with no body, so there is still no CORS preflight. The response says which warm-up ran (`warmed: "client"` or `"generic"`) and never whether the client exists. Older SDKs that send no `clientId` keep the generic warm-up. No API change.

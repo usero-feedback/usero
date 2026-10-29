@@ -214,6 +214,7 @@ export function initUseroFeedbackWidget(
 	let metadata: Record<string, unknown> | undefined = props.metadata
 	let launcherTypeProp: WidgetLauncherType | undefined = props.launcherType
 	let launcherLabel: string | undefined = props.launcherLabel
+	let launcherIcon: string = props.launcherIcon ?? '💬'
 	let hideTrigger: boolean = props.hideTrigger ?? false
 	let disablePageContext: boolean = props.disablePageContext ?? false
 	let onSubmit: FeedbackWidgetProps['onSubmit'] = props.onSubmit
@@ -583,7 +584,7 @@ export function initUseroFeedbackWidget(
 		buttonEl.innerHTML = isOpen
 			? `<span style="font-size:20px;">✕</span>`
 			: isPill
-				? `<span aria-hidden="true">💬</span><span class="fb-btn-lbl">${escapeHtml(label)}</span>`
+				? `${launcherIcon === '' ? '' : `<span aria-hidden="true">${escapeHtml(launcherIcon)}</span>`}<span class="fb-btn-lbl">${escapeHtml(label)}</span>`
 				: ''
 		// 'none' hides the launcher only; the panel, plugins, and the
 		// handle's open()/close() keep working so a host can drive the
@@ -936,6 +937,10 @@ export function initUseroFeedbackWidget(
 				next.launcherLabel !== launcherLabel
 			) {
 				launcherLabel = next.launcherLabel
+				needsRender = true
+			}
+			if (next.launcherIcon !== undefined && next.launcherIcon !== launcherIcon) {
+				launcherIcon = next.launcherIcon
 				needsRender = true
 			}
 			// Non-render-affecting props: just swap refs.

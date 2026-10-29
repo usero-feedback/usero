@@ -124,6 +124,7 @@ export const UseroFeedbackWidget = forwardRef<
 		if (props.launcherLabel !== undefined) {
 			updates.launcherLabel = props.launcherLabel
 		}
+		if (props.launcherIcon !== undefined) updates.launcherIcon = props.launcherIcon
 		if (props.disablePageContext !== undefined) {
 			updates.disablePageContext = props.disablePageContext
 		}
@@ -142,6 +143,7 @@ export const UseroFeedbackWidget = forwardRef<
 		props.hideTrigger,
 		props.launcherType,
 		props.launcherLabel,
+		props.launcherIcon,
 		props.disablePageContext,
 	])
 

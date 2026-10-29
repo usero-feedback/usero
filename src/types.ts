@@ -109,6 +109,9 @@ export interface FeedbackWidgetProps {
 	// Text on the 'button' launcher. Ignored by the other launchers,
 	// defaults to `title`.
 	launcherLabel?: string
+	// Emoji or short text before the 'button' launcher's label. Default 💬,
+	// empty string shows no icon.
+	launcherIcon?: string
 	/** @deprecated Use `launcherType: 'none'`. Still honoured, but `launcherType` wins when both are set. */
 	hideTrigger?: boolean
 	// Privacy: when true, submissions omit pageUrl/pageTitle/referrer

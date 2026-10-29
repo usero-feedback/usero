@@ -1,5 +1,5 @@
 // Launcher options: `launcherType` ('tab' | 'button' | 'none') and
-// `launcherLabel`, plus the deprecated `hideTrigger` alias.
+// `launcherLabel` and `launcherIcon`, plus the deprecated `hideTrigger` alias.
 //
 // Run with: node --test tests/launcher-options.test.mjs
 //
@@ -160,6 +160,49 @@ test('launcherLabel is HTML-escaped', () => {
 	})
 	assert.ok(!button.innerHTML.includes('<img'), 'label must not inject markup')
 	assert.ok(button.innerHTML.includes('&lt;img'))
+	handle.destroy()
+})
+
+test("launcherIcon defaults to the speech bubble on the 'button' launcher", () => {
+	const { handle, button } = mount({ launcherType: 'button' })
+	assert.ok(button.innerHTML.startsWith('<span aria-hidden="true">💬</span>'))
+	handle.destroy()
+})
+
+test('launcherIcon replaces the emoji, and an empty string removes it', () => {
+	const custom = mount({ launcherType: 'button', launcherLabel: 'Report a bug', launcherIcon: '🐛' })
+	assert.ok(custom.button.innerHTML.startsWith('<span aria-hidden="true">🐛</span>'))
+	assert.ok(!custom.button.innerHTML.includes('💬'))
+	assert.equal(custom.button.getAttribute('aria-label'), 'Report a bug', 'icon stays out of the accessible name')
+	custom.handle.destroy()
+
+	const bare = mount({ launcherType: 'button', launcherLabel: 'Feedback', launcherIcon: '' })
+	assert.equal(bare.button.innerHTML, '<span class="fb-btn-lbl">Feedback</span>')
+	bare.handle.destroy()
+})
+
+test('launcherIcon is HTML-escaped and ignored by the tab launcher', () => {
+	const escaped = mount({ launcherType: 'button', launcherIcon: '<b>!</b>' })
+	assert.ok(!escaped.button.innerHTML.includes('<b>'))
+	assert.ok(escaped.button.innerHTML.includes('&lt;b&gt;!&lt;/b&gt;'))
+	escaped.handle.destroy()
+
+	const tab = mount({ launcherIcon: '🐛' })
+	assert.equal(tab.button.innerHTML, '')
+	tab.handle.destroy()
+})
+
+test('update() hot-swaps the launcher icon', () => {
+	const { handle, button } = mount({ launcherType: 'button', launcherLabel: 'Feedback' })
+	handle.update({ launcherIcon: '🐛' })
+	assert.ok(button.innerHTML.includes('🐛'))
+	assert.ok(!button.innerHTML.includes('💬'))
+
+	handle.update({ launcherIcon: '' })
+	assert.equal(button.innerHTML, '<span class="fb-btn-lbl">Feedback</span>')
+
+	handle.update({ launcherIcon: '💬' })
+	assert.ok(button.innerHTML.includes('💬'))
 	handle.destroy()
 })
 

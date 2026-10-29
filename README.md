@@ -78,6 +78,7 @@ The widget auto-detects the OS color scheme via `prefers-color-scheme`. It picks
 | `metadata`             | `Record<string, unknown>`     | undefined                                     | Arbitrary metadata attached to feedback    |
 | `launcherType`         | `'tab' \| 'button' \| 'none'` | `'tab'`                                       | Launcher shape: edge tab, labelled corner button, or none |
 | `launcherLabel`        | `string`                      | falls back to `title`                         | Text on the `'button'` launcher            |
+| `launcherIcon`         | `string`                      | `'💬'`                                        | Emoji or short text before the `'button'` label, `''` for none |
 | `hideTrigger`          | `boolean`                     | `false`                                       | Deprecated, use `launcherType: 'none'`     |
 | `disablePageContext`   | `boolean`                     | `false`                                       | Don't send `pageUrl` / `pageTitle` / `referrer` |
 | `onSubmit`             | `(data) => void`              | undefined                                     | Fires after a successful submission        |
@@ -89,7 +90,7 @@ The widget auto-detects the OS color scheme via `prefers-color-scheme`. It picks
 `launcherType` picks what the visitor clicks to open the panel.
 
 - `'tab'` (default) is the half-pill stuck to the middle of the screen edge named by `position`.
-- `'button'` is a labelled pill in the bottom corner on that same side. `launcherLabel` sets the text and falls back to `title`.
+- `'button'` is a labelled pill in the bottom corner on that same side. `launcherLabel` sets the text and falls back to `title`. `launcherIcon` swaps the 💬 before it for another emoji or short text, and `''` drops it.
 - `'none'` renders no launcher. The panel, plugins and identity still mount, so open the widget yourself via the handle's `open()` (vanilla) or a ref (React).
 
 ```ts
@@ -97,6 +98,7 @@ initUseroFeedbackWidget({
   clientId: 'YOUR_CLIENT_ID',
   launcherType: 'button',
   launcherLabel: 'Report a bug',
+  launcherIcon: '🐛',
 })
 ```
 

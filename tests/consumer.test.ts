@@ -49,6 +49,7 @@ void ({ ...propsWithPrivacy, hideTrigger: true, disablePageContext: true } satis
 
 // Launcher options type-check, including the 'none' replacement for hideTrigger.
 void ({ ...propsWithPrivacy, launcherType: 'button', launcherLabel: 'Report a bug' } satisfies FeedbackWidgetProps)
+void ({ ...propsWithPrivacy, launcherType: 'button', launcherIcon: '🐛' } satisfies ReactProps)
 void ({ ...propsWithPrivacy, launcherType: 'none' } satisfies ReactProps)
 declare const widgetHandle: UseroFeedbackWidgetHandle
 widgetHandle.open()
