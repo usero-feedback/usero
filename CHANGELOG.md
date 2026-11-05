@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.6.5
+
+Patch. A failed send while the page hides or closes no longer logs `chunk N dropped after 1 attempts` as an error. That send gets one try and the upload lane retries it for as long as the page lives, so it was a false alarm in any error tracker that captures console errors. It now logs a warning with the failure reason, and only exhausted retries log an error, also with the reason. No change to submit, the upload path or the wire format.
+
+`npm run perf` medians, 5 runs per mode (250 ms latency, 4x CPU, Playwright Chromium, mock API):
+
+| Mode | Click to feedback sent | Click to success | Replay linked | Longest task at record start | Longest task on return |
+| --- | --- | --- | --- | --- | --- |
+| live recording | 16 ms | 293 ms | 5 of 5 (in the POST) | 122 ms | |
+| snapshot | 4 ms | 278 ms | 5 of 5 (at snapshot create) | | |
+| ask (Include) | 4 ms | 278 ms | 5 of 5 (at snapshot create) | | |
+| resume after app switch | 9 ms | 284 ms | 5 of 5 (in the POST, same session) | 111 ms | 0 ms |
+
 ## 1.6.4
 
 Patch. New `launcherIcon` option for the `'button'` launcher. It sets the emoji or short text shown before the label, so a "Report a bug" button can lead with 🐛 instead of 💬. The default stays 💬, and an empty string (`launcherIcon: ''`) shows the label alone. The icon is HTML-escaped, stays out of the button's accessible name (it sits in an `aria-hidden` span, as the 💬 always has), and is ignored by the `'tab'` and `'none'` launchers. It hot-swaps through `update()` and the React prop like `launcherLabel`, with no remount. No change to submit, replay or the wire format.

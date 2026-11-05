@@ -211,6 +211,34 @@ test('a chunk that fails all attempts is counted and reported on the next chunk'
 	assert.equal(store.droppedSinceLastUpload, 0)
 })
 
+test('a failed unload send warns and the lane retries it; only exhausted retries log an error', async () => {
+	let calls = 0
+	globalThis.fetch = async () => {
+		calls += 1
+		return calls === 1 ? new Response('down', { status: 503 }) : new Response('{"ok":true}', { status: 200 })
+	}
+	const store = makeStore()
+	const { ctx, warnings } = makeCtx()
+	const errors = []
+	ctx.logger.error = (...args) => errors.push(args)
+	emit(store, ctx, { type: 3, data: 'a', timestamp: 1 }, 256)
+	flushForUnload(store, ctx)
+	await drain(store)
+	assert.equal(calls, 2, 'the lane resent the chunk')
+	assert.deepEqual(errors, [])
+	assert.ok(warnings.some(w => /chunk 0 unload send failed \(HTTP 503\), upload lane will retry/.test(w[0])))
+	assert.equal(store.droppedSinceLastUpload, 0, 'a retried chunk is not a drop')
+
+	calls = 0
+	globalThis.fetch = async () => new Response('down', { status: 503 })
+	const exhausted = makeStore()
+	exhausted.options.chunkMaxAttempts = 1
+	emit(exhausted, ctx, { type: 3, data: 'b', timestamp: 2 }, 256)
+	scheduleChunkUpload(exhausted, ctx)
+	await drain(exhausted)
+	assert.match(errors[0]?.[0] ?? '', /chunk 0 dropped after 1 attempts \(HTTP 503\)/)
+})
+
 test('flushForUnload fires every waiting chunk at once on keepalive, behind a slow in-flight one', async () => {
 	const requests = []
 	let releaseFirst

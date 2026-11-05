@@ -516,6 +516,7 @@ async function uploadChunk(
 	logger: PluginContext['logger'],
 	maxAttempts: number,
 	droppedBefore: number,
+	isUnloadSend = false,
 ): Promise<ChunkUploadResult> {
 	// Metadata rides in the query and the body is text/plain, so this is a CORS simple request:
 	// no preflight round trip per chunk, and it stays valid inside keepalive on unload.
@@ -536,6 +537,7 @@ async function uploadChunk(
 	const timeoutMs = 30_000 + Math.ceil(bytes.byteLength / 10)
 	let allowKeepalive = true
 	let attempt = 0
+	let lastFailure = 'unknown'
 	while (attempt < maxAttempts) {
 		// keepalive lets the request outlive a page hide or unload, within the browser's 64KB budget.
 		const keepalive = allowKeepalive && keepaliveBytesInFlight + bytes.byteLength <= KEEPALIVE_BUDGET_BYTES
@@ -561,8 +563,10 @@ async function uploadChunk(
 				logger.error(`chunk ${seq} rejected with ${res.status}`)
 				return { ok: false, stopSession: false }
 			}
+			lastFailure = `HTTP ${res.status}`
 		} catch (err) {
-			logger.warn(`chunk ${seq} attempt ${attempt + 1} failed`, err)
+			lastFailure = err instanceof Error ? err.message : String(err)
+			if (!isUnloadSend) logger.warn(`chunk ${seq} attempt ${attempt + 1} failed`, err)
 			// A keepalive quota rejection (other keepalive traffic on the page) retries without it.
 			if (keepalive) allowKeepalive = false
 		} finally {
@@ -574,7 +578,9 @@ async function uploadChunk(
 		const backoff = Math.min(RETRY_BACKOFF_CAP_MS, 500 * 2 ** attempt) + Math.floor(Math.random() * 250)
 		await new Promise(resolve => setTimeout(resolve, backoff))
 	}
-	logger.error(`chunk ${seq} dropped after ${maxAttempts} attempts`)
+	// A failed unload send is not a loss: the lane retries it for as long as the page lives.
+	if (isUnloadSend) logger.warn(`chunk ${seq} unload send failed (${lastFailure}), upload lane will retry`)
+	else logger.error(`chunk ${seq} dropped after ${maxAttempts} attempts (${lastFailure})`)
 	return { ok: false, stopSession: false }
 }
 
@@ -822,6 +828,7 @@ function flushForUnload(store: ReplayStore, ctx: PluginContext): void {
 			ctx.logger,
 			1,
 			chunk.droppedBefore,
+			true,
 		).then(r => r.ok)
 
 	// Gzip is async and never completes in an unloading page, so the oldest events that fit the
