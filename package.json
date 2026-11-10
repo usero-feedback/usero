@@ -73,7 +73,7 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "build": "tsup && node scripts/sync-wp-vendor.mjs && node scripts/verify-dist.mjs",
+    "build": "npm run clean && tsup && node scripts/sync-wp-vendor.mjs && node scripts/verify-dist.mjs",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",

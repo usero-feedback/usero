@@ -52,7 +52,9 @@ export default defineConfig([
 		format: ['esm', 'cjs'],
 		dts: true,
 		sourcemap: true,
-		clean: true,
+		// dist is emptied by `npm run build`; tsup's clean also wipes every .d.ts
+		// whenever this config's DTS worker starts, racing the other configs.
+		clean: false,
 		treeshake: true,
 		platform: 'browser',
 		target: 'es2020',
