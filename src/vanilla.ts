@@ -10,7 +10,6 @@
 // feedback row created here is indistinguishable from one created via React.
 
 import { FeedbackApiClient } from './api'
-import { getGradientEnd } from './colorUtils'
 import {
 	buildFeedbackSubmission,
 	createIdentityHandle,
@@ -23,7 +22,6 @@ import { DEFAULT_API_URL, type UseroUser } from './types'
 import {
 	DARK_THEME,
 	DEFAULT_THEME,
-	EMOJI_BACKGROUNDS,
 	EMOJI_MAP,
 	type FeedbackData,
 	type FeedbackRating,
@@ -37,13 +35,14 @@ import {
 	type WidgetTheme,
 } from './types'
 import { validateFeedbackSubmission } from './validation'
-import { FEEDBACK_CSS } from './widgetCss'
+import { buildThemeVariablesCss, FEEDBACK_CSS } from './widgetCss'
 
 export {
 	DARK_THEME,
 	DEFAULT_THEME,
 	mergeTheme,
 }
+export type { WidgetPart } from './types'
 
 // Test-only re-export of the identity module's internal hooks (identity.ts is
 // bundled into this entry, so it has no standalone dist file to import from).
@@ -77,6 +76,7 @@ export type {
 	FeedbackSubmission,
 	FeedbackWidgetProps,
 	ScreenshotData,
+	WidgetButtonStyle,
 	WidgetLauncherType,
 	WidgetPosition,
 	WidgetTheme,
@@ -208,6 +208,7 @@ export function initUseroFeedbackWidget(
 	let theme: WidgetTheme = resolveTheme(userThemeOverride)
 	let title: string = props.title ?? 'Share Feedback'
 	let placeholder: string = props.placeholder ?? 'Tell us what you think... (optional)'
+	let submitLabel: string = props.submitLabel ?? 'Send Feedback 🚀'
 	let showEmailOption: boolean = props.showEmailOption ?? true
 	let showScreenshotOption: boolean = props.showScreenshotOption ?? true
 	let environment: string | undefined = props.environment
@@ -217,6 +218,7 @@ export function initUseroFeedbackWidget(
 	let launcherIcon: string = props.launcherIcon ?? '💬'
 	let hideTrigger: boolean = props.hideTrigger ?? false
 	let disablePageContext: boolean = props.disablePageContext ?? false
+	let customCss: string | undefined = props.customCss
 	let onSubmit: FeedbackWidgetProps['onSubmit'] = props.onSubmit
 	let onError: FeedbackWidgetProps['onError'] = props.onError
 	let onOpen: FeedbackWidgetProps['onOpen'] = props.onOpen
@@ -316,7 +318,11 @@ export function initUseroFeedbackWidget(
 	}
 	notifyShadowUpdate('mount')
 
-	// Inject styles once into the shadow root.
+	// Theme variables (rewritten on theme change), then the static stylesheet.
+	const themeStyle = document.createElement('style')
+	themeStyle.setAttribute('data-usero-theme', '')
+	themeStyle.textContent = buildThemeVariablesCss(theme)
+	root.appendChild(themeStyle)
 	const style = document.createElement('style')
 	style.textContent = FEEDBACK_CSS
 	root.appendChild(style)
@@ -325,9 +331,35 @@ export function initUseroFeedbackWidget(
 	const buttonEl = document.createElement('button')
 	const backdropEl = document.createElement('div')
 	const panelEl = document.createElement('div')
+	buttonEl.setAttribute('part', 'launcher')
+	backdropEl.setAttribute('part', 'backdrop')
+	panelEl.setAttribute('part', 'panel')
 	root.appendChild(buttonEl)
 	root.appendChild(backdropEl)
 	root.appendChild(panelEl)
+
+	// Customer CSS goes in the last <style> so it wins ties with ours. Internals
+	// (.fb-*) are unstable; parts and --usero-* variables are the contract.
+	let customStyle: HTMLStyleElement | null = null
+	function applyCustomCss(): void {
+		const css = customCss?.trim() ?? ''
+		if (css === '') {
+			customStyle?.remove()
+			customStyle = null
+			return
+		}
+		if (!customStyle) {
+			customStyle = document.createElement('style')
+			customStyle.setAttribute('data-usero-custom-css', '')
+			root.appendChild(customStyle)
+		}
+		customStyle.textContent = css
+	}
+	applyCustomCss()
+
+	function applyTheme(): void {
+		themeStyle.textContent = buildThemeVariablesCss(theme)
+	}
 
 	function setSubmitMessage(
 		next: { type: 'success' | 'error'; text: string } | null,
@@ -430,7 +462,7 @@ export function initUseroFeedbackWidget(
 		const btnDisabled = isUploadingScreenshot || atMax
 		return `
 			<input type="file" accept="image/*" data-role="screenshot-input" style="display:none;" aria-label="Choose screenshot" />
-			<button type="button" class="fb-upb ${btnDisabled ? 'fb-upb--dis' : ''}" data-role="screenshot-pick" ${btnDisabled ? 'disabled' : ''} style="border:1px solid ${theme.border};color:${theme.text};">
+			<button type="button" class="fb-upb ${btnDisabled ? 'fb-upb--dis' : ''}" data-role="screenshot-pick" part="screenshot" ${btnDisabled ? 'disabled' : ''}>
 				${buildUploadButtonInner()}
 			</button>
 		`
@@ -580,7 +612,6 @@ export function initUseroFeedbackWidget(
 		buttonEl.className = `fb-btn fb-btn--${position} ${isPill ? 'fb-btn--pill' : ''} ${isOpen ? 'fb-btn--open' : ''}`
 		buttonEl.setAttribute('aria-label', isPill ? label : 'Open feedback')
 		buttonEl.type = 'button'
-		buttonEl.style.background = `linear-gradient(135deg, ${theme.primary}, ${getGradientEnd(theme.primary)})`
 		buttonEl.innerHTML = isOpen
 			? `<span style="font-size:20px;">✕</span>`
 			: isPill
@@ -605,14 +636,6 @@ export function initUseroFeedbackWidget(
 		panelEl.className = `fb-pnl-base fb-pnl--${position} ${
 			isOpen ? 'fb-pnl--open' : 'fb-pnl--closed'
 		}`
-		panelEl.style.backgroundColor = theme.background
-		if (position === 'right') {
-			panelEl.style.borderLeft = `1px solid ${theme.border}`
-			panelEl.style.borderRight = ''
-		} else {
-			panelEl.style.borderRight = `1px solid ${theme.border}`
-			panelEl.style.borderLeft = ''
-		}
 		panelEl.setAttribute('role', 'dialog')
 		panelEl.setAttribute('aria-modal', 'true')
 		panelEl.setAttribute('aria-labelledby', 'usero-feedback-title')
@@ -623,16 +646,13 @@ export function initUseroFeedbackWidget(
 		const ratingsHtml = ([1, 2, 3, 4] as FeedbackRating[])
 			.map(r => {
 				const sel = selectedRating === r
-				const bg = EMOJI_BACKGROUNDS[r]
-				const cls = ['fb-ec', sel && 'fb-ec--sel'].filter(Boolean).join(' ')
-				// Set color on the button so .fb-el (color: currentColor) inherits
-				// the themed foreground. Without this it falls back to the UA
-				// default for <button>, which is black on dark backgrounds.
+				const cls = ['fb-ec', `fb-ec--r${r}`, sel && 'fb-ec--sel'].filter(Boolean).join(' ')
+				const part = sel ? 'rating-option rating-option-selected' : 'rating-option'
 				return `
-					<div class="${cls}" style="background:${bg}">
-						<button type="button" class="fb-eb" data-rating="${r}" role="radio" aria-checked="${sel}" aria-label="${r}: ${RATING_LABELS[r]}" style="color:${theme.text}">
+					<div class="${cls}" part="${part}">
+						<button type="button" class="fb-eb" data-rating="${r}" role="radio" aria-checked="${sel}" aria-label="${r}: ${RATING_LABELS[r]}">
 							<div class="fb-ei"><span role="img" aria-label="${RATING_LABELS[r]}">${EMOJI_MAP[r]}</span></div>
-							<div class="fb-el" style="color:${theme.text}">${RATING_LABELS[r]}</div>
+							<div class="fb-el">${RATING_LABELS[r]}</div>
 						</button>
 					</div>
 				`
@@ -640,7 +660,7 @@ export function initUseroFeedbackWidget(
 			.join('')
 
 		const messageHtml = submitMessage
-			? `<div class="fb-msg fb-msg--header ${submitMessage.type === 'success' ? 'fb-msg--ok' : 'fb-msg--err'}">${submitMessage.type === 'success' ? '✓' : '⚠'} ${escapeHtml(submitMessage.text)}</div>`
+			? `<div part="message" class="fb-msg fb-msg--header ${submitMessage.type === 'success' ? 'fb-msg--ok' : 'fb-msg--err'}">${submitMessage.type === 'success' ? '✓' : '⚠'} ${escapeHtml(submitMessage.text)}</div>`
 			: ''
 
 		// The upload button + char counter share a single horizontal row to
@@ -653,13 +673,13 @@ export function initUseroFeedbackWidget(
 		const emailBlockHtml = showEmailOption
 			? `
 				<div class="fb-email">
-					<label class="fb-email-lbl" style="color:${theme.text}">
+					<label class="fb-email-lbl" part="email-toggle">
 						<input type="checkbox" class="fb-email-cb" data-role="share-email" ${shareEmail ? 'checked' : ''} aria-label="Share email" />
 						<span>Share my email</span>
 					</label>
 					${
 						shareEmail
-							? `<input type="email" class="fb-email-inp" data-role="email-input" value="${escapeHtml(userEmail)}" placeholder="your.email@example.com" aria-label="Email" maxlength="254" autocomplete="email" style="border:1px solid ${theme.border};color:${theme.text};background-color:${theme.background};" />`
+							? `<input type="email" class="fb-email-inp" data-role="email-input" value="${escapeHtml(userEmail)}" placeholder="your.email@example.com" aria-label="Email" maxlength="254" autocomplete="email" part="email" />`
 							: ''
 					}
 				</div>
@@ -667,27 +687,26 @@ export function initUseroFeedbackWidget(
 			: ''
 
 		const submitDisabled = isSubmitting
-		const submitStyle = `background:linear-gradient(135deg, ${theme.primary}, ${getGradientEnd(theme.primary)});color:#ffffff;${submitDisabled ? 'opacity:0.6;cursor:not-allowed;' : ''}`
 
 		panelEl.innerHTML = `
 			<div class="fb-cnt">
-				<div class="fb-hdr" style="border-bottom:1px solid ${theme.border}">
-					<h2 id="usero-feedback-title" class="fb-ttl" style="color:${theme.text}">${escapeHtml(title)}</h2>
+				<div class="fb-hdr" part="header">
+					<h2 id="usero-feedback-title" class="fb-ttl" part="title">${escapeHtml(title)}</h2>
 					${messageHtml}
-					<button class="fb-close-btn" data-role="close" style="color:${theme.text}" aria-label="Close" type="button">✕</button>
+					<button class="fb-close-btn" data-role="close" part="close" aria-label="Close" type="button">✕</button>
 				</div>
-				<form data-role="form">
-					<div class="fb-es" role="radiogroup" aria-label="Rate experience">${ratingsHtml}</div>
-					<textarea class="fb-ta" data-role="comment" placeholder="${escapeHtml(placeholder)}" aria-label="Comments" maxlength="1000" rows="2" style="border:1px solid ${theme.border};color:${theme.text};background-color:${theme.background};">${escapeHtml(comment)}</textarea>
+				<form data-role="form" part="form">
+					<div class="fb-es" part="rating" role="radiogroup" aria-label="Rate experience">${ratingsHtml}</div>
+					<textarea class="fb-ta" data-role="comment" placeholder="${escapeHtml(placeholder)}" aria-label="Comments" maxlength="1000" rows="2" part="textarea">${escapeHtml(comment)}</textarea>
 					<div class="fb-toolrow">
 						${uploadBtnHtml}
-						<div class="fb-charcount${lowChars ? ' fb-charcount--low' : ''}" data-role="charcount" style="color:${lowChars ? '#dc2626' : theme.text};opacity:${lowChars ? 1 : 0.6};">${remaining} chars remaining</div>
+						<div class="fb-charcount${lowChars ? ' fb-charcount--low' : ''}" data-role="charcount" part="char-count">${remaining} chars remaining</div>
 					</div>
 					${showScreenshotOption ? `<div class="fb-up">${uploadExtrasHtml}</div>` : ''}
 					${emailBlockHtml}
-					<button class="fb-sub ${submitDisabled ? 'fb-sub--dis' : ''}" type="submit" aria-label="Submit" ${submitDisabled ? 'disabled' : ''} style="${submitStyle}">
+					<button class="fb-sub ${submitDisabled ? 'fb-sub--dis' : ''}" type="submit" ${submitDisabled ? 'disabled' : ''} part="submit">
 						${isSubmitting ? '<span class="fb-spin"></span>' : ''}
-						${isSubmitting ? 'Submitting...' : 'Send Feedback 🚀'}
+						${isSubmitting ? 'Submitting...' : escapeHtml(submitLabel)}
 					</button>
 				</form>
 			</div>
@@ -740,8 +759,7 @@ export function initUseroFeedbackWidget(
 					if (counter) {
 						const left = 1000 - comment.length
 						counter.textContent = `${left} chars remaining`
-						counter.style.color = left < 50 ? '#dc2626' : theme.text
-						counter.style.opacity = left < 50 ? '1' : '0.6'
+						counter.classList.toggle('fb-charcount--low', left < 50)
 					}
 				}
 			})
@@ -848,7 +866,7 @@ export function initUseroFeedbackWidget(
 			// Only react if user still hasn't overridden the theme.
 			if (userThemeOverride !== undefined) return
 			theme = resolveTheme(undefined)
-			render()
+			applyTheme()
 		}
 		darkMql.addEventListener('change', mqlListener)
 	}
@@ -897,7 +915,11 @@ export function initUseroFeedbackWidget(
 				theme = resolveTheme(userThemeOverride)
 				if (userThemeOverride === undefined) attachMqlListener()
 				else detachMqlListener()
-				needsRender = true
+				applyTheme()
+			}
+			if ('customCss' in next && next.customCss !== customCss) {
+				customCss = next.customCss
+				applyCustomCss()
 			}
 			if (next.title !== undefined && next.title !== title) {
 				title = next.title
@@ -905,6 +927,10 @@ export function initUseroFeedbackWidget(
 			}
 			if (next.placeholder !== undefined && next.placeholder !== placeholder) {
 				placeholder = next.placeholder
+				needsRender = true
+			}
+			if (next.submitLabel !== undefined && next.submitLabel !== submitLabel) {
+				submitLabel = next.submitLabel
 				needsRender = true
 			}
 			if (

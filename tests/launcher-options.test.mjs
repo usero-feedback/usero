@@ -248,3 +248,27 @@ test('update() hot-swaps the launcher type and label', () => {
 	assert.equal(button.style.display, 'none')
 	handle.destroy()
 })
+
+function findPanel() {
+	const panel = [...createdElements].reverse().find(el => el.className.includes('fb-pnl'))
+	assert.ok(panel, 'expected a rendered panel element')
+	return panel
+}
+
+test('submitLabel sets the submit button text, defaulting to the old copy', () => {
+	const def = mount({})
+	def.handle.open()
+	assert.ok(findPanel().innerHTML.includes('Send Feedback 🚀'), 'default label')
+	def.handle.destroy()
+
+	const { handle } = mount({ submitLabel: 'Send <it>' })
+	handle.open()
+	const html = findPanel().innerHTML
+	assert.ok(html.includes('Send &lt;it&gt;'), 'custom label rendered and escaped')
+	assert.ok(!html.includes('Send Feedback 🚀'), 'default label replaced')
+	assert.ok(!html.includes('aria-label="Submit"'), 'the visible label is the accessible name')
+
+	handle.update({ submitLabel: 'Ship it' })
+	assert.ok(findPanel().innerHTML.includes('Ship it'), 'update() hot-swaps the label')
+	handle.destroy()
+})

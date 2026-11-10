@@ -4,6 +4,19 @@
 // Vanilla entry injects it inside a shadow root, so host page styles
 // can't bleed in and our class names can't collide with the host.
 
+import { getButtonColors, getGradientEnd } from './colorUtils'
+import {
+	EMOJI_BACKGROUNDS,
+	WIDGET_CSS_VARIABLES,
+	type WidgetTheme,
+	type WidgetThemeColor,
+} from './types'
+
+const RATING_BACKGROUNDS_CSS = ([1, 2, 3, 4] as const)
+	.map(r => `.fb-ec--r${r}{background:${EMOJI_BACKGROUNDS[r]}}`)
+	.join('')
+
+// Kept free of ${} so the build can minify it (tsup.config.ts).
 export const FEEDBACK_CSS = `
 @keyframes spin {
   0% { transform: rotate(0deg); }
@@ -27,9 +40,10 @@ export const FEEDBACK_CSS = `
 }
 
 .fb-ec--sel {
-  border-color: #2563eb;
+  border-color: var(--usero-primary, #2563eb);
   transform: scale(1.05);
   box-shadow: 0 4px 15px rgba(37, 99, 235, 0.2);
+  box-shadow: 0 4px 15px color-mix(in srgb, var(--usero-primary, #2563eb) 20%, transparent);
 }
 
 .fb-ec--hov:not(.fb-ec--sel) {
@@ -47,6 +61,12 @@ export const FEEDBACK_CSS = `
   width: 100%;
   padding: 0;
   transition: all 200ms ease;
+}
+
+.fb-eb:focus-visible {
+  outline: 2px solid var(--usero-primary, #2563eb);
+  outline-offset: 2px;
+  border-radius: 12px;
 }
 
 .fb-ei {
@@ -313,7 +333,8 @@ export const FEEDBACK_CSS = `
   width: 400px;
   max-width: 90vw;
   max-height: 60vh;
-  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+  box-shadow: var(--usero-shadow, 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05));
+  background-color: var(--usero-background);
   transition: transform 300ms cubic-bezier(0.25, 0.46, 0.45, 0.94);
   z-index: 10000;
   display: flex;
@@ -453,6 +474,35 @@ export const FEEDBACK_CSS = `
   opacity: 0.6;
 }
 
+.fb-btn,
+.fb-sub {
+  background: var(--usero-button-background);
+  color: var(--usero-button-text);
+}
+.fb-pnl--right { border-left: 1px solid var(--usero-border); }
+.fb-pnl--left { border-right: 1px solid var(--usero-border); }
+.fb-hdr { border-bottom: 1px solid var(--usero-border); }
+.fb-ttl,
+.fb-close-btn,
+.fb-eb,
+.fb-el,
+.fb-email-lbl {
+  color: var(--usero-text);
+}
+.fb-ta,
+.fb-email-inp {
+  border: 1px solid var(--usero-border);
+  color: var(--usero-text);
+  background-color: var(--usero-background);
+}
+.fb-upb {
+  border: 1px solid var(--usero-border);
+  color: var(--usero-text);
+}
+.fb-charcount { color: var(--usero-text); opacity: 0.6; }
+.fb-charcount--low { color: #dc2626; opacity: 1; }
+.fb-sub--dis { opacity: 0.6; }
+
 @media (max-width: 768px) {
   .fb-pnl-base {
     width: 100% !important;
@@ -467,7 +517,35 @@ export const FEEDBACK_CSS = `
   .fb-el { font-size: 11px !important; }
   .fb-sub { padding: 12px 20px !important; font-size: 16px !important; }
 }
+` + RATING_BACKGROUNDS_CSS
+
+// Strips characters that could close the declaration or the rule.
+function cssValue(value: string): string {
+	return value.replace(/[;{}<>]/g, '')
+}
+
+// `:host` rule with the resolved theme as --usero-* variables. A page rule on
+// [data-usero-widget] beats :host, so customers override without !important.
+// --usero-primary-end is derived from --usero-primary where relative colours
+// are supported, so overriding the primary also moves the gradient.
+export function buildThemeVariablesCss(theme: WidgetTheme): string {
+	const decls = (Object.keys(WIDGET_CSS_VARIABLES) as Array<WidgetThemeColor>)
+		.map(key => `  ${WIDGET_CSS_VARIABLES[key]}: ${cssValue(theme[key])};`)
+		.join('\n')
+	const button = getButtonColors(theme.primary, theme.buttonStyle)
+	return `:host {
+${decls}
+  --usero-primary-end: ${cssValue(getGradientEnd(theme.primary))};
+  --usero-button-background: ${button.background};
+  --usero-button-text: ${button.color};
+}
+@supports (color: rgb(from red r g b)) {
+  :host {
+    --usero-primary-end: rgb(from var(--usero-primary) max(0, r - 60) min(255, g + 40) min(255, b + 20));
+  }
+}
 `
+}
 
 export function injectFeedbackCSS(): void {
 	if (typeof document === 'undefined') return

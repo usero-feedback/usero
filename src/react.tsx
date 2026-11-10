@@ -28,7 +28,9 @@ export type {
 	UseroUser,
 	UseroUserTraitValue,
 	UseroUserTraits,
+	WidgetButtonStyle,
 	WidgetLauncherType,
+	WidgetPart,
 	WidgetPosition,
 	WidgetTheme,
 } from './types'
@@ -111,6 +113,7 @@ export const UseroFeedbackWidget = forwardRef<
 		if (props.theme !== undefined) updates.theme = props.theme
 		if (props.title !== undefined) updates.title = props.title
 		if (props.placeholder !== undefined) updates.placeholder = props.placeholder
+		if (props.submitLabel !== undefined) updates.submitLabel = props.submitLabel
 		if (props.showEmailOption !== undefined) {
 			updates.showEmailOption = props.showEmailOption
 		}
@@ -128,6 +131,8 @@ export const UseroFeedbackWidget = forwardRef<
 		if (props.disablePageContext !== undefined) {
 			updates.disablePageContext = props.disablePageContext
 		}
+		// Always forwarded: undefined or empty removes the custom stylesheet.
+		updates.customCss = props.customCss
 		handle.update(updates)
 		// theme/metadata compared by serialized identity since they're
 		// objects; primitives use direct dep tracking.
@@ -136,6 +141,7 @@ export const UseroFeedbackWidget = forwardRef<
 		themeJson,
 		props.title,
 		props.placeholder,
+		props.submitLabel,
 		props.showEmailOption,
 		props.showScreenshotOption,
 		props.environment,
@@ -145,6 +151,7 @@ export const UseroFeedbackWidget = forwardRef<
 		props.launcherLabel,
 		props.launcherIcon,
 		props.disablePageContext,
+		props.customCss,
 	])
 
 	// Identity: diff the resolved user by id + email + serialised traits.

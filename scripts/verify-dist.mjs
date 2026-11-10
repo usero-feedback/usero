@@ -29,6 +29,9 @@ const pkgPath = resolve(repoRoot, 'package.json')
 // imports statically, i.e. what a consumer downloads up front. `lazy rrweb` is
 // the chunk loaded on demand. Raising a budget needs Will's OK (docs/PERFORMANCE.md).
 const GZIP_BUDGETS = {
+	// board: new in 1.7.0, boardUrl() on its own subpath, ~5% over its first build.
+	'./dist/board.cjs': 550,
+	'./dist/board.js': 530,
 	'./dist/headless.cjs': 5600,
 	'./dist/headless.js': 5500,
 	'./dist/headless/react.cjs': 6200,

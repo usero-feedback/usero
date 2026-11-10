@@ -84,7 +84,14 @@ export interface WidgetTheme {
 	text: string
 	border: string
 	shadow: string
+	// Launcher and submit button fill: 'gradient' (default) or 'flat', primary
+	// alone with black or white text, whichever has the higher contrast.
+	buttonStyle?: WidgetButtonStyle
 }
+
+export type WidgetButtonStyle = 'gradient' | 'flat'
+
+export type WidgetThemeColor = Exclude<keyof WidgetTheme, 'buttonStyle'>
 
 // Forward-declared to avoid a circular import. The plugin module imports
 // FeedbackSubmission from this file, so we can't import UseroPlugin back
@@ -96,6 +103,8 @@ export interface FeedbackWidgetProps {
 	theme?: Partial<WidgetTheme>
 	title?: string
 	placeholder?: string
+	// Text on the panel's submit button. Defaults to 'Send Feedback 🚀'.
+	submitLabel?: string
 	showEmailOption?: boolean
 	showScreenshotOption?: boolean
 	environment?: string
@@ -120,6 +129,10 @@ export interface FeedbackWidgetProps {
 	// sensitive info (e.g. a desktop app shell where the title holds a
 	// connection name or file path). Default false, zero behaviour change.
 	disablePageContext?: boolean
+	// Extra CSS appended last inside the widget's shadow root. Target
+	// `::part()` names (WIDGET_PARTS) and `--usero-*` variables; `.fb-*`
+	// class names are internal and may change between versions.
+	customCss?: string
 	plugins?: ReadonlyArray<import('./plugin').UseroPlugin>
 	// Declarative identity. React: pass the current user (or null on
 	// logout) and the SDK auto-fires identify when the resolved id
@@ -181,6 +194,39 @@ export const DARK_THEME: WidgetTheme = {
 	border: '#374151',
 	shadow:
 		'0 10px 15px -3px rgba(0, 0, 0, 0.3), 0 4px 6px -2px rgba(0, 0, 0, 0.2)',
+}
+
+// Public styling contract: `part="..."` names on the widget's stable pieces.
+// Style them from the page with `[data-usero-widget]::part(submit) { ... }`.
+export const WIDGET_PARTS = [
+	'launcher',
+	'backdrop',
+	'panel',
+	'header',
+	'title',
+	'message',
+	'close',
+	'form',
+	'rating',
+	'rating-option',
+	'rating-option-selected',
+	'textarea',
+	'char-count',
+	'screenshot',
+	'email-toggle',
+	'email',
+	'submit',
+] as const
+
+export type WidgetPart = (typeof WIDGET_PARTS)[number]
+
+// Public styling contract: CSS custom properties, one per WidgetTheme colour.
+export const WIDGET_CSS_VARIABLES: Record<WidgetThemeColor, string> = {
+	primary: '--usero-primary',
+	background: '--usero-background',
+	text: '--usero-text',
+	border: '--usero-border',
+	shadow: '--usero-shadow',
 }
 
 export function mergeTheme(customTheme: Partial<WidgetTheme> = {}): WidgetTheme {

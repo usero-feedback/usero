@@ -4,6 +4,8 @@
 // and that the published .d.ts files type-check from the outside.
 
 import { initUseroFeedbackWidget } from '@usero/sdk'
+import { boardUrl } from '@usero/sdk/board'
+import type { BoardUrlOptions } from '@usero/sdk/board'
 import type {
 	FeedbackWidgetProps,
 	UseroPlugin,
@@ -37,6 +39,11 @@ handle.close()
 const ready: Promise<void> = handle.whenReady()
 void ready
 
+// boardUrl resolves from its own subpath.
+const prefillLink: string = boardUrl({ board: 'acme', fields: { Plan: 'Pro', Seats: 5 }, email: 'a@example.com' })
+void prefillLink
+void ({ board: 'acme', path: 'home', baseUrl: 'https://feedback.acme.com' } satisfies BoardUrlOptions)
+
 // Just reference the React export to ensure the module + its type re-exports resolve.
 const _component: typeof UseroFeedbackWidget = UseroFeedbackWidget
 void _component
@@ -49,6 +56,12 @@ void ({ ...propsWithPrivacy, hideTrigger: true, disablePageContext: true } satis
 
 // Launcher options type-check, including the 'none' replacement for hideTrigger.
 void ({ ...propsWithPrivacy, launcherType: 'button', launcherLabel: 'Report a bug' } satisfies FeedbackWidgetProps)
+void ({
+	...propsWithPrivacy,
+	submitLabel: 'Send',
+	customCss: '[part~=submit] { border-radius: 4px; }',
+	theme: { primary: '#ff7a00', buttonStyle: 'flat' },
+} satisfies FeedbackWidgetProps)
 void ({ ...propsWithPrivacy, launcherType: 'button', launcherIcon: '🐛' } satisfies ReactProps)
 void ({ ...propsWithPrivacy, launcherType: 'none' } satisfies ReactProps)
 declare const widgetHandle: UseroFeedbackWidgetHandle

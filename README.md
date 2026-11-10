@@ -62,6 +62,15 @@ The widget includes a screenshot upload button by default. Users can attach up t
 
 The widget auto-detects the OS color scheme via `prefers-color-scheme`. It picks the built-in dark theme on dark systems and the light theme on light systems, and swaps live if the user toggles modes while the widget is open. When no preference is reported (older browsers, SSR), it defaults to dark. Pass an explicit `theme` to override; explicit values always win, and partial overrides merge on top of the OS-resolved base.
 
+`WidgetTheme` keys: `primary`, `background`, `text`, `border`, `shadow`, and `buttonStyle`. The launcher and submit button default to a gradient derived from `primary`. Set `buttonStyle: 'flat'` to fill them with `primary` alone; the text then switches to black or white, whichever reads better on that colour. The selected rating and the rating focus ring follow `primary` too.
+
+```ts
+initUseroFeedbackWidget({
+  clientId: 'YOUR_CLIENT_ID',
+  theme: { primary: '#ff7a00', buttonStyle: 'flat' },
+})
+```
+
 ## Options
 
 | Option                 | Type                          | Default                                       | Description                                |
@@ -71,6 +80,7 @@ The widget auto-detects the OS color scheme via `prefers-color-scheme`. It picks
 | `theme`                | `Partial<WidgetTheme>`        | auto (OS color scheme, dark fallback)         | Override colors. Wins over auto-detection  |
 | `title`                | `string`                      | `'Share Feedback'`                            | Panel header                               |
 | `placeholder`          | `string`                      | `'Tell us what you think... (optional)'`      | Comment placeholder                        |
+| `submitLabel`          | `string`                      | `'Send Feedback 🚀'`                          | Text on the panel's submit button          |
 | `showEmailOption`      | `boolean`                     | `true`                                        | Show the "share my email" checkbox         |
 | `showScreenshotOption` | `boolean`                     | `true`                                        | Show the screenshot upload button (up to 3 images, 10MB each) |
 | `environment`          | `string`                      | undefined                                     | Tag feedback with an environment           |
@@ -81,6 +91,7 @@ The widget auto-detects the OS color scheme via `prefers-color-scheme`. It picks
 | `launcherIcon`         | `string`                      | `'💬'`                                        | Emoji or short text before the `'button'` label, `''` for none |
 | `hideTrigger`          | `boolean`                     | `false`                                       | Deprecated, use `launcherType: 'none'`     |
 | `disablePageContext`   | `boolean`                     | `false`                                       | Don't send `pageUrl` / `pageTitle` / `referrer` |
+| `customCss`            | `string`                      | undefined                                     | Extra CSS added inside the widget, after its own styles. See [Styling](#styling) |
 | `onSubmit`             | `(data) => void`              | undefined                                     | Fires after a successful submission        |
 | `onError`              | `(err: Error) => void`        | undefined                                     | Fires on init or submission error          |
 | `onOpen` / `onClose`   | `() => void`                  | undefined                                     | Fire when the panel opens/closes           |
@@ -101,6 +112,28 @@ initUseroFeedbackWidget({
   launcherIcon: '🐛',
 })
 ```
+
+## Styling
+
+The widget renders in a shadow root on `<div data-usero-widget>`. Restyle it three ways:
+
+- CSS variables. `--usero-primary`, `--usero-background`, `--usero-text`, `--usero-border` and `--usero-shadow` hold the `theme` colours. A rule on `[data-usero-widget]` in your stylesheet overrides them, no `!important` needed.
+- Parts. Style the stable pieces from your page with `[data-usero-widget]::part(submit)`. The names: `launcher`, `backdrop`, `panel`, `header`, `title`, `message`, `close`, `form`, `rating`, `rating-option`, `rating-option-selected`, `textarea`, `char-count`, `screenshot`, `email-toggle`, `email`, `submit`.
+- `customCss`. A string of CSS added as the last stylesheet inside the shadow root. Select parts there with `[part~=submit]`.
+
+```css
+[data-usero-widget] { --usero-primary: #d9480f; --usero-background: #0b0b0d; }
+[data-usero-widget]::part(submit) { border-radius: 4px; }
+```
+
+```ts
+initUseroFeedbackWidget({
+  clientId: 'YOUR_CLIENT_ID',
+  customCss: '[part~=title] { font-family: Georgia, serif; }',
+})
+```
+
+Variables and part names stay stable between versions. The internal `.fb-*` class names may change in any release. Full guide: https://usero.io/docs/widget/styling
 
 ## Privacy options
 
@@ -332,6 +365,26 @@ Identify calls are deduped, so calling on every render or route change is free w
 `createUseroFeedback(options)` takes `clientId` (required), `apiUrl`, `environment`, `metadata` (attached to every submission, deep-merged one level with per-submission metadata), `plugins`, and `user` / `getUser`. The returned controller has `submit`, `uploadScreenshot`, `identify`, `whenReady` (resolves when every plugin's `onInit` has settled), `notifyShadowMount`, and `destroy`. Everything is typed: `SubmitFeedbackPayload`, `SubmissionResponse`, `ScreenshotData`, `UseroUser`, `UseroPlugin`, and friends are all exported from `@usero/sdk/headless`.
 
 The headless entry is its own subpath export with no widget CSS, no React, and no rrweb: 3.2KB gzipped minified.
+
+## Board links with answers pre-filled
+
+`boardUrl(options)` builds a link to your Usero public board with its custom fields and the author email already filled in, so a visitor is not asked for what your app knows (plan, platform, email). It is a pure function: no widget, no network.
+
+```ts
+import { boardUrl } from '@usero/sdk/board'
+
+boardUrl({ board: 'acme', fields: { Plan: 'Pro', Seats: 12 }, email: 'ada@example.com' })
+// https://usero.io/b/acme/submit?field.Plan=Pro&field.Seats=12&email=ada%40example.com
+```
+
+`fields` is keyed by field id (`cf_...`) or label; null, undefined and empty values are skipped. `path: 'home'` links to the board instead of the submit form (answers carry over when the visitor posts), and `baseUrl` points at a custom domain. Pre-filled answers stay visible and editable. Docs: https://usero.io/docs/public-board#pre-fill-answers-your-app-already-knows
+
+`boardUrl` lives on its own subpath, so the widget bundle does not carry it. The script-tag build has no `boardUrl`; build the same link with `URLSearchParams`:
+
+```js
+const params = new URLSearchParams({ 'field.Plan': 'Pro', email: 'ada@example.com' })
+const link = `https://usero.io/b/acme/submit?${params}`
+```
 
 ## Plugins
 

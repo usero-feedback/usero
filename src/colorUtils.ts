@@ -23,3 +23,18 @@ export function getGradientEnd(color: string): string {
 		.map(x => x.toString(16).padStart(2, '0'))
 		.join('')}`
 }
+
+// Launcher and submit fill as CSS values. The gradient's second stop is
+// --usero-primary-end, so a --usero-primary override moves both stops.
+export function getButtonColors(
+	primary: string,
+	buttonStyle: 'gradient' | 'flat' | undefined,
+): { background: string; color: string } {
+	if (buttonStyle !== 'flat') {
+		return { background: 'linear-gradient(135deg, var(--usero-primary), var(--usero-primary-end))', color: '#fff' }
+	}
+	// YIQ brightness: near-black text on light fills, white on dark ones.
+	const n = parseInt(colorNameToHex(primary).slice(1, 7), 16)
+	const yiq = ((n >> 16) * 299 + ((n >> 8) & 255) * 587 + (n & 255) * 114) / 1000
+	return { background: 'var(--usero-primary)', color: Number.isNaN(n) || yiq < 128 ? '#fff' : '#111827' }
+}

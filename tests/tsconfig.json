@@ -15,6 +15,7 @@
 		"paths": {
 			"@usero/sdk": ["./dist/vanilla.d.ts"],
 			"@usero/sdk/react": ["./dist/react.d.ts"],
+			"@usero/sdk/board": ["./dist/board.d.ts"],
 			"@usero/sdk/plugins/session-replay": ["./dist/plugins/session-replay.d.ts"],
 			"@usero/sdk/replay": ["./dist/replay.d.ts"],
 			"@usero/sdk/replay/react": ["./dist/replay/react.d.ts"],

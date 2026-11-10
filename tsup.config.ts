@@ -1,4 +1,27 @@
+import { readFile } from 'node:fs/promises'
+import { transform, type Plugin } from 'esbuild'
 import { defineConfig } from 'tsup'
+
+// Minifies the FEEDBACK_CSS template in widgetCss.ts at build time, so the
+// source stays readable and the published bundle carries compact CSS.
+const minifyWidgetCss: Plugin = {
+	name: 'minify-widget-css',
+	setup(build) {
+		build.onLoad({ filter: /src[\\/]widgetCss\.ts$/ }, async args => {
+			const source = await readFile(args.path, 'utf8')
+			const open = 'export const FEEDBACK_CSS = `'
+			const start = source.indexOf(open)
+			const end = source.indexOf('`', start + open.length)
+			const raw = source.slice(start + open.length, end)
+			if (start < 0 || end < 0 || raw.includes('${') || raw.includes('\\')) {
+				throw new Error('minify-widget-css: FEEDBACK_CSS must be a plain template literal with no ${} or backslashes')
+			}
+			const { code } = await transform(raw, { loader: 'css', minify: true })
+			const minified = `export const FEEDBACK_CSS = ${JSON.stringify(code.trim())}`
+			return { contents: source.slice(0, start) + minified + source.slice(end + 1), loader: 'ts' }
+		})
+	},
+}
 
 // Four build configs:
 //   1. vanilla            -> ESM + CJS + .d.ts (entry: '@usero/sdk')
@@ -33,6 +56,7 @@ export default defineConfig([
 		target: 'es2020',
 		// Vanilla must NOT pull react in. If anything imports it the build fails.
 		external: ['react', 'react-dom'],
+		esbuildPlugins: [minifyWidgetCss],
 		outExtension: ({ format }) => ({
 			js: format === 'cjs' ? '.cjs' : '.js',
 		}),
@@ -48,6 +72,7 @@ export default defineConfig([
 		platform: 'browser',
 		target: 'es2020',
 		external: ['react', 'react-dom'],
+		esbuildPlugins: [minifyWidgetCss],
 		outExtension: ({ format }) => ({
 			js: format === 'cjs' ? '.cjs' : '.js',
 		}),
@@ -81,6 +106,7 @@ export default defineConfig([
 		platform: 'browser',
 		target: 'es2020',
 		external: ['react', 'react-dom'],
+		esbuildPlugins: [minifyWidgetCss],
 		noExternal: ['rrweb'],
 		outExtension: ({ format }) => ({
 			js: format === 'cjs' ? '.cjs' : '.js',
@@ -100,6 +126,7 @@ export default defineConfig([
 		platform: 'browser',
 		target: 'es2020',
 		external: ['react', 'react-dom'],
+		esbuildPlugins: [minifyWidgetCss],
 		outExtension: ({ format }) => ({
 			js: format === 'cjs' ? '.cjs' : '.js',
 		}),
@@ -126,6 +153,7 @@ export default defineConfig([
 		platform: 'browser',
 		target: 'es2020',
 		external: ['react', 'react-dom'],
+		esbuildPlugins: [minifyWidgetCss],
 		outExtension: ({ format }) => ({
 			js: format === 'cjs' ? '.cjs' : '.js',
 		}),
@@ -143,6 +171,22 @@ export default defineConfig([
 		target: 'es2020',
 		globalName: 'Usero',
 		external: ['react', 'react-dom'],
+		esbuildPlugins: [minifyWidgetCss],
 		outExtension: () => ({ js: '.js' }),
+	},
+	// 7. boardUrl -> ESM + CJS + types (entry: '@usero/sdk/board'). A pure
+	// function, kept out of the widget entries so they don't carry it.
+	{
+		entry: { board: 'src/boardUrl.ts' },
+		format: ['esm', 'cjs'],
+		dts: true,
+		sourcemap: true,
+		clean: false,
+		treeshake: true,
+		platform: 'browser',
+		target: 'es2020',
+		outExtension: ({ format }) => ({
+			js: format === 'cjs' ? '.cjs' : '.js',
+		}),
 	},
 ])
