@@ -46,7 +46,9 @@ const minifyWidgetCss: Plugin = {
 export default defineConfig([
 	// 1. Vanilla ESM + CJS + types
 	{
-		entry: { vanilla: 'src/vanilla.ts' },
+		// board: boardUrl() on its own subpath ('@usero/sdk/board'). It shares this
+		// config so one DTS pass emits it; a separate config raced the clean.
+		entry: { vanilla: 'src/vanilla.ts', board: 'src/boardUrl.ts' },
 		format: ['esm', 'cjs'],
 		dts: true,
 		sourcemap: true,
@@ -173,20 +175,5 @@ export default defineConfig([
 		external: ['react', 'react-dom'],
 		esbuildPlugins: [minifyWidgetCss],
 		outExtension: () => ({ js: '.js' }),
-	},
-	// 7. boardUrl -> ESM + CJS + types (entry: '@usero/sdk/board'). A pure
-	// function, kept out of the widget entries so they don't carry it.
-	{
-		entry: { board: 'src/boardUrl.ts' },
-		format: ['esm', 'cjs'],
-		dts: true,
-		sourcemap: true,
-		clean: false,
-		treeshake: true,
-		platform: 'browser',
-		target: 'es2020',
-		outExtension: ({ format }) => ({
-			js: format === 'cjs' ? '.cjs' : '.js',
-		}),
 	},
 ])
