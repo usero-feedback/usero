@@ -1,0 +1,26 @@
+{
+	"version": "1.7.0",
+	"sizes": {
+		"./dist/board.cjs": 521,
+		"./dist/board.js": 502,
+		"./dist/headless.cjs": 5417,
+		"./dist/headless.js": 5287,
+		"./dist/headless/react.cjs": 5993,
+		"./dist/headless/react.js": 5882,
+		"./dist/plugins/session-replay.cjs": 12977,
+		"./dist/plugins/session-replay.js": 12745,
+		"./dist/plugins/user-test.cjs": 22456,
+		"./dist/plugins/user-test.js": 22429,
+		"./dist/react.cjs": 13878,
+		"./dist/react.js": 13875,
+		"./dist/replay.cjs": 12973,
+		"./dist/replay.js": 12741,
+		"./dist/replay/react.cjs": 12885,
+		"./dist/replay/react.js": 12772,
+		"./dist/usero.iife.js": 10386,
+		"./dist/vanilla.cjs": 13268,
+		"./dist/vanilla.js": 13231,
+		"lazy rrweb (.js)": 115918,
+		"lazy rrweb (.cjs)": 115976
+	}
+}

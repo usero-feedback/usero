@@ -12,10 +12,11 @@
 // published exports map points at a non-existent file is the real bug. This
 // script fails the build loudly the moment any declared target is missing, so
 // a broken artifact can never reach npm.
+// 1.7.0 traced the dropped .d.ts to tsup's `clean` racing the other configs; `npm run build` now empties dist first.
 //
 // Dependency-free. Runs as the last step of `npm run build`.
 
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { gzipSync } from 'node:zlib'
@@ -23,6 +24,8 @@ import { gzipSync } from 'node:zlib'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '..')
 const pkgPath = resolve(repoRoot, 'package.json')
+// Sizes of the last release, for the per-change delta. Refresh with --write-baseline when cutting a release.
+const baselinePath = resolve(__dirname, 'size-baseline.json')
 
 // Gzipped byte budgets, ~5% over the 1.5.1 build (replay entries: 1.6.0, which
 // adds the upload lane, after the test seams left the published bundle). An entry's size is the entry file plus every chunk it
@@ -137,7 +140,12 @@ async function main() {
 		console.log(
 			`verify-dist: OK, all ${targets.size} declared package entry points exist and are non-empty.`,
 		)
-		checkBudgets(await measureBundles([...targets].filter(t => /\.(c?js)$/.test(t))))
+		const sizes = await measureBundles([...targets].filter(t => /\.(c?js)$/.test(t)))
+		if (process.argv.includes('--write-baseline')) {
+			await writeFile(baselinePath, `${JSON.stringify({ version: pkg.version, sizes }, null, '\t')}\n`)
+			console.log(`verify-dist: wrote size baseline for ${pkg.version}`)
+		}
+		checkBudgets(sizes, await readBaseline())
 		return
 	}
 
@@ -157,15 +165,32 @@ async function main() {
 	process.exit(1)
 }
 
-function checkBudgets(sizes) {
+async function readBaseline() {
+	try {
+		const parsed = JSON.parse(await readFile(baselinePath, 'utf8'))
+		return parsed && typeof parsed.version === 'string' && parsed.sizes ? parsed : null
+	} catch {
+		return null
+	}
+}
+
+const signed = n => (n > 0 ? `+${n}` : String(n))
+
+function checkBudgets(sizes, baseline) {
 	const over = []
 	const unbudgeted = []
+	const deltaLabel = baseline ? `vs ${baseline.version}` : 'vs last release'
 	for (const [label, bytes] of Object.entries(sizes)) {
 		const budget = GZIP_BUDGETS[label]
 		if (budget === undefined) unbudgeted.push(label)
 		else if (bytes > budget) over.push(label)
 		const status = budget === undefined ? 'NO BUDGET' : bytes > budget ? 'OVER' : 'ok'
-		console.log(`  ${label.padEnd(38)} ${String(bytes).padStart(7)} B gz  budget ${budget ?? '-'}  ${status}`)
+		const headroom = budget === undefined ? '' : `headroom ${String(budget - bytes).padStart(6)}`
+		const before = baseline?.sizes?.[label]
+		const delta = typeof before === 'number' ? `${deltaLabel} ${signed(bytes - before).padStart(6)}` : `${deltaLabel}    new`
+		console.log(
+			`  ${label.padEnd(38)} ${String(bytes).padStart(7)} B gz  budget ${String(budget ?? '-').padStart(6)}  ${headroom}  ${delta}  ${status}`,
+		)
 	}
 	if (over.length === 0 && unbudgeted.length === 0) {
 		console.log('verify-dist: OK, every entry is within its gzipped size budget.')

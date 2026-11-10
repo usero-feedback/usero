@@ -29,9 +29,10 @@ Publishing happens in the PUBLIC repo's `.github/workflows/publish.yml`, which t
 
 1. In `feedback/widget/`: bump `version` in `package.json` (patch by default).
 2. `npm run typecheck`, `npm run build` and `npm run perf` (must pass its budgets, see `docs/PERFORMANCE.md`).
-3. Prepend a one-paragraph entry to `CHANGELOG.md`, followed by the `npm run perf` medians table from step 2 (click to feedback
+3. Run `node scripts/verify-dist.mjs --write-baseline` so the next change's deltas are against this release.
+   Prepend a one-paragraph entry to `CHANGELOG.md`, followed by the `npm run perf` medians table from step 2 (click to feedback
    sent, click to success, replay linked, per mode), so every release records its submit speed.
-4. Commit `Release: @usero/sdk v<version>` (stage `widget/package.json`, `widget/package-lock.json`, `widget/CHANGELOG.md` explicitly by path; no `git add -A`).
+4. Commit `Release: @usero/sdk v<version>` (stage `widget/package.json`, `widget/package-lock.json`, `widget/CHANGELOG.md`, `widget/scripts/size-baseline.json` explicitly by path; no `git add -A`).
 5. Push the feedback repo's `main`. The mirror workflow pushes the source to the public repo, whose publish workflow sees the `package.json` change and publishes. Its "already published?" guard makes no-version-change mirror pushes a no-op.
 6. The mirror workflow pushes the `v<version>` tag automatically when the version changed (this is what fires the WordPress release workflow). No manual tagging.
 7. Bump consumer repos (see below). Always `feedback` (usero.io itself runs the latest SDK); every other consumer only when the
@@ -72,6 +73,13 @@ The legacy `react-feedback-collector` package is consumed by a separate set of r
 - Submit critical path: zero awaited requests or capture before the feedback POST, success UI never blocked; gzipped bundle
   budgets live in `scripts/verify-dist.mjs`. Run `npm run perf` before any change touching submit, replay or bundle size, and
   before every release. Raising any budget needs Will's OK. Details: `docs/PERFORMANCE.md`.
+- Size discipline (Will, 2026-11-11, after 1.7.0 landed +1.3 KB and had to be cut back):
+  - Code the widget doesn't run (helpers like `boardUrl`) goes in a subpath entry (`@usero/sdk/board`), never the main entry.
+  - No runtime exports that only docs or tests read; keep those lists in `src/types.ts` and read the source.
+  - Pick the simplest algorithm that meets the need (a brightness check, not a WCAG luminance module).
+  - `FEEDBACK_CSS` is minified at build (`tsup.config.ts`); keep it a plain template literal, no `${}`.
+  - Every widget change states its gz delta from `npm run build` output in the commit or PR; over +150 B on any build says what
+    it buys.
 - The SDK runs in customer production browsers. Treat the replay plugin as a hot path: no localStorage on every event, no per-render network, no JSON.stringify in tight loops.
 - Storage failures (localStorage throwing in sandboxed iframes, Safari Lockdown, quota exceeded) must NEVER break replay capture. Wrap in try/catch with in-memory fallback. See `src/identity.ts` for the working pattern.
 - Identity is monotonic: traits/email/displayName can only be added or replaced by a new identify call, never cleared. Logout (`user={null}`) rotates the anonymousId rather than nulling the existing person link.
