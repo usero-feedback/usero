@@ -154,6 +154,12 @@ export function buildIndicator(host: HTMLElement, store: RecorderStore, callback
 		}
 		.mic:hover { background: rgba(255,255,255,0.12); }
 		.mic:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+		/* Live: red tint so "this is recording" reads at a glance on any screen. */
+		.mic[data-mic-state="recording"] {
+			background: rgba(239, 68, 68, 0.18);
+			border-color: rgba(239, 68, 68, 0.5);
+		}
+		.mic[data-mic-state="recording"]:hover { background: rgba(239, 68, 68, 0.26); }
 		.mic[data-mic-state="muted"] {
 			background: rgba(251, 191, 36, 0.18);
 			border-color: rgba(251, 191, 36, 0.45);
@@ -211,13 +217,28 @@ export function buildIndicator(host: HTMLElement, store: RecorderStore, callback
 			color: #fff; font: inherit; font-weight: 600;
 			padding: 6px 12px; min-height: 32px; border-radius: 999px; cursor: pointer;
 			transition: background 0.15s ease, transform 0.06s ease;
-			display: inline-flex; align-items: center; gap: 6px;
+			display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
 		}
 		.btn:hover { background: rgba(255,255,255,0.20); }
 		.btn:active { transform: scale(0.97); }
 		.btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 		.btn[disabled] { opacity: 0.5; cursor: progress; }
-		.tasks-btn[aria-expanded="true"] { background: rgba(255,255,255,0.24); }
+		.tasks-btn[aria-expanded="true"], .finish-btn[aria-expanded="true"] { background: rgba(255,255,255,0.24); }
+
+		/* "Finish the test?" confirm, above the bar */
+		.finish-confirm {
+			display: inline-flex; align-items: center; gap: 8px;
+			background: rgba(17,17,17,0.94);
+			border: 1px solid rgba(255,255,255,0.10);
+			border-radius: 999px; padding: 7px 7px 7px 16px;
+			box-shadow: 0 12px 28px rgba(0,0,0,0.28);
+			font-weight: 500; white-space: nowrap;
+			animation: pop-in 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+		}
+		.finish-confirm[hidden] { display: none; }
+		.finish-confirm .q { margin-right: 4px; }
+		.btn-end { background: #dc2626; }
+		.btn-end:hover { background: #b91c1c; }
 
 		/* Note button: icon-only, matches mic chip footprint */
 		.note-btn {
@@ -268,10 +289,8 @@ export function buildIndicator(host: HTMLElement, store: RecorderStore, callback
 			to { opacity: 0; transform: translateY(4px); }
 		}
 
-		/* "Recording resumed" confirmation: same pill footprint as the mute toast,
-		   but carries the live-record red accent (not the amber warning treatment)
-		   so it reads as reassurance, not a problem. Compact, inline, auto-dismisses.
-		   Leads with the same pulsing record dot used on the bar's mic chip. */
+		/* "Recording your screen and voice" / "Recording resumed": red record accent,
+		   reassurance rather than warning. Leads with the bar's pulsing dot. */
 		.resume-toast {
 			display: inline-flex; align-items: center; gap: 8px;
 			background: rgba(17,17,17,0.92);
@@ -569,7 +588,7 @@ export function buildIndicator(host: HTMLElement, store: RecorderStore, callback
 		}
 		@media (prefers-reduced-motion: reduce) {
 			.dot { animation: none; }
-			.toast, .note-popover, .resume-toast { animation: none; }
+			.toast, .note-popover, .resume-toast, .finish-confirm { animation: none; }
 			.resume-toast[data-leaving="true"] { opacity: 0; }
 			.anchor { transition: none; }
 		}
@@ -590,6 +609,14 @@ export function buildIndicator(host: HTMLElement, store: RecorderStore, callback
 	const notePopover = document.createElement('div')
 	notePopover.className = 'note-popover'
 	notePopover.hidden = true
+
+	const confirm = document.createElement('div')
+	confirm.className = 'finish-confirm'
+	confirm.hidden = true
+	confirm.setAttribute('role', 'alertdialog')
+	confirm.setAttribute('aria-modal', 'true')
+	confirm.setAttribute('aria-labelledby', 'usero-finish-q')
+	confirm.innerHTML = '<span class="q" id="usero-finish-q">Finish the test?</span><button type="button" class="btn">Keep going</button><button type="button" class="btn btn-end">Finish</button>'
 
 	const bar = document.createElement('div')
 	bar.className = 'bar'
@@ -642,6 +669,7 @@ export function buildIndicator(host: HTMLElement, store: RecorderStore, callback
 	btn.type = 'button'
 	btn.className = 'btn finish-btn'
 	btn.textContent = 'Finish'
+	btn.setAttribute('aria-expanded', 'false')
 	btn.addEventListener('click', callbacks.onFinish)
 	bar.appendChild(btn)
 
@@ -650,11 +678,52 @@ export function buildIndicator(host: HTMLElement, store: RecorderStore, callback
 	anchor.appendChild(panel)
 	anchor.appendChild(toastSlot)
 	anchor.appendChild(notePopover)
+	anchor.appendChild(confirm)
 	anchor.appendChild(bar)
 
 	root.appendChild(style)
 	root.appendChild(anchor)
 	return root
+}
+
+// A stray tap on Finish (beside Tasks) ended a test 35s in, so while recording Finish asks first. Retry stays one tap.
+export function finishTap(store: RecorderStore, end: () => void): void {
+	if (store.indicatorState === 'error') return end()
+	if (store.finishConfirmOpen) return closeFinishConfirm(store)
+	const root = store.indicatorRoot
+	const pop = root?.querySelector<HTMLElement>('.finish-confirm')
+	const [keep, yes] = pop?.querySelectorAll('button') ?? []
+	if (!pop || !keep || !yes) return
+	store.finishConfirmOpen = true
+	keep.onclick = () => closeFinishConfirm(store)
+	yes.onclick = () => { closeFinishConfirm(store); end() }
+	// Two buttons, so Tab just swaps between them and focus stays in the confirm.
+	pop.onkeydown = e => {
+		if (e.key === 'Escape') closeFinishConfirm(store)
+		else if (e.key === 'Tab') { e.preventDefault(); (e.target === keep ? yes : keep).focus() }
+	}
+	pop.hidden = false
+	root?.querySelector('.finish-btn')?.setAttribute('aria-expanded', 'true')
+	keep.focus({ preventScroll: true })
+}
+
+export function closeFinishConfirm(store: RecorderStore): void {
+	store.finishConfirmOpen = false
+	const root = store.indicatorRoot
+	const pop = root?.querySelector<HTMLElement>('.finish-confirm')
+	const btn = root?.querySelector<HTMLButtonElement>('.finish-btn')
+	if (pop) pop.hidden = true
+	btn?.setAttribute('aria-expanded', 'false')
+	btn?.focus({ preventScroll: true })
+}
+
+// Document pointerdown: a tap anywhere but the confirm or Finish closes it, and recording carries on.
+export function finishConfirmPointer(store: RecorderStore, path: EventTarget[]): void {
+	const root = store.indicatorRoot
+	if (!store.finishConfirmOpen || !root) return
+	const pop = root.querySelector('.finish-confirm')
+	const btn = root.querySelector('.finish-btn')
+	if (!path.some(n => n === pop || n === btn)) closeFinishConfirm(store)
 }
 
 export function installTasksToggle(bar: HTMLElement, finishBtn: HTMLElement, store: RecorderStore, onToggleTasks: () => void): void {
@@ -888,6 +957,16 @@ export function showResumedToast(store: RecorderStore): void {
 	// let the existing mic-blocked affordance (the mic chip in its failed state)
 	// carry the message instead. Same signal the mic chip gates on (line ~1119).
 	if (!store.hasMicPermission || store.indicatorState === 'no-audio') return
+	showRecordingToast(store, 'Recording resumed', 3200)
+}
+
+// Fresh-start counterpart: confirms the moment capture goes live, so nobody starts a backup Loom or Zoom.
+export function showStartedToast(store: RecorderStore): void {
+	if (!store.hasMicPermission || store.indicatorState === 'no-audio') return
+	showRecordingToast(store, 'Recording your screen and voice', 6000)
+}
+
+function showRecordingToast(store: RecorderStore, text: string, visibleMs: number): void {
 	const root = store.indicatorRoot
 	if (!root) return
 	const slot = root.querySelector('.toast-slot')
@@ -900,7 +979,7 @@ export function showResumedToast(store: RecorderStore): void {
 	dot.className = 'dot'
 	dot.setAttribute('aria-hidden', 'true')
 	const label = document.createElement('span')
-	label.textContent = 'Recording resumed'
+	label.textContent = text
 	toast.appendChild(dot)
 	toast.appendChild(label)
 	slot.appendChild(toast)
@@ -911,7 +990,7 @@ export function showResumedToast(store: RecorderStore): void {
 			if (toast.isConnected) toast.remove()
 		}, 260)
 		store.resumeToastTimers.push(inner)
-	}, 3200)
+	}, visibleMs)
 	store.resumeToastTimers.push(outer)
 }
 

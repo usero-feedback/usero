@@ -100,8 +100,7 @@ export interface RecorderStore {
 	lastMicReacquireAt: number
 	muteToastShown: boolean
 	muteToastTimers: number[]
-	// Timers for the "Recording resumed" confirmation pill (shown once after a
-	// resume across a hard navigation). Tracked so onDestroy can clear them.
+	// Timers for the "Recording your screen and voice" / "Recording resumed" pills, cleared in onDestroy.
 	resumeToastTimers: number[]
 	// In-flight notes
 	notes: InFlightNote[]
@@ -111,6 +110,8 @@ export interface RecorderStore {
 	endNote: string
 	// Re-entry guard for finishFlow.
 	finishFlowRan: boolean
+	// "Finish the test?" confirm is showing above the bar.
+	finishConfirmOpen: boolean
 	// Set once the chunk-upload path sees a definitive "session closed" signal
 	// from the server (409 + closeResume: true, raised when finalise has already
 	// snapshotted the session). Guards against running the terminal close flow

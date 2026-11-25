@@ -102,6 +102,8 @@ import {
 	buildIndicator,
 	closeNotePopover,
 	computeKeyboardInset,
+	finishConfirmPointer,
+	finishTap,
 	installTasksToggle,
 	micChipState,
 	openNotePopover,
@@ -111,6 +113,7 @@ import {
 	renderTasksPanel,
 	showMuteToast,
 	showResumedToast,
+	showStartedToast,
 	showSessionEndedScreen,
 	writeTasksPanelOpen,
 } from './user-test/ui'
@@ -213,6 +216,7 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				notePopoverAtMs: null,
 				endNote: '',
 				finishFlowRan: false,
+				finishConfirmOpen: false,
 				sessionClosed: false,
 				onSessionClosed: null,
 			paused: false,
@@ -246,9 +250,7 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				}
 			}
 
-			const onFinish = (): void => {
-				void finishFlow(store, ctx, { showThanks: true })
-			}
+			const onFinish = (): void => finishTap(store, () => void finishFlow(store, ctx, { showThanks: true }))
 
 			const setPanelOpen = (open: boolean): void => {
 				if (store.tasksPanelOpen === open) return
@@ -341,6 +343,7 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				const host = store.indicator
 				if (!host) return
 				const path = event.composedPath()
+				finishConfirmPointer(store, path)
 				if (path.includes(host)) return
 				if (store.tasksPanelOpen) setPanelOpen(false)
 				if (store.notesPopoverOpen) closeNote()
@@ -468,11 +471,9 @@ export function userTest(options: UserTestOptions = {}): UseroPlugin {
 				}
 				await startRecording(store, ctx)
 				renderIndicatorState(store)
-				// Recorder is live again. If this leg was a resume across a hard
-				// navigation, give the participant a brief, unobtrusive confirmation
-				// that the test is still recording. No-op on a fresh start (the guard
-				// checks store.resumed and clears it so it fires at most once).
-				showResumedToast(store)
+				// Recorder is live: confirm it, "started" on a fresh start, "resumed" after a hard navigation.
+				if (store.freshStart) showStartedToast(store)
+				else showResumedToast(store)
 			})()
 		},
 		onDestroy(ctx) {
@@ -534,6 +535,9 @@ export const __test__ = {
 	MIC_REACQUIRE_DEBOUNCE_MS,
 	handleSessionClosed,
 	micChipState,
+	finishTap,
+	finishConfirmPointer,
+	showStartedToast,
 	computeKeyboardInset,
 	isStreamSilent,
 	rmsDbFromSamples,

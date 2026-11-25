@@ -2,24 +2,32 @@ import { readFile } from 'node:fs/promises'
 import { transform, type Plugin } from 'esbuild'
 import { defineConfig } from 'tsup'
 
-// Minifies the FEEDBACK_CSS template in widgetCss.ts at build time, so the
+// Minifies the stylesheet template literal that follows `open` in a source file, so the
 // source stays readable and the published bundle carries compact CSS.
+async function minifyCssLiteral(path: string, open: string): Promise<string> {
+	const source = await readFile(path, 'utf8')
+	const start = source.indexOf(open)
+	const end = source.indexOf('`', start + open.length)
+	const raw = source.slice(start + open.length, end)
+	if (start < 0 || end < 0 || raw.includes('${') || raw.includes('\\')) {
+		throw new Error(`minify-widget-css: "${open}" in ${path} must start a plain template literal with no \${} or backslashes`)
+	}
+	const { code } = await transform(raw, { loader: 'css', minify: true })
+	return source.slice(0, start) + open.slice(0, -1) + JSON.stringify(code.trim()) + source.slice(end + 1)
+}
+
+// FEEDBACK_CSS (widget) and the user-test recorder bar's stylesheet.
 const minifyWidgetCss: Plugin = {
 	name: 'minify-widget-css',
 	setup(build) {
-		build.onLoad({ filter: /src[\\/]widgetCss\.ts$/ }, async args => {
-			const source = await readFile(args.path, 'utf8')
-			const open = 'export const FEEDBACK_CSS = `'
-			const start = source.indexOf(open)
-			const end = source.indexOf('`', start + open.length)
-			const raw = source.slice(start + open.length, end)
-			if (start < 0 || end < 0 || raw.includes('${') || raw.includes('\\')) {
-				throw new Error('minify-widget-css: FEEDBACK_CSS must be a plain template literal with no ${} or backslashes')
-			}
-			const { code } = await transform(raw, { loader: 'css', minify: true })
-			const minified = `export const FEEDBACK_CSS = ${JSON.stringify(code.trim())}`
-			return { contents: source.slice(0, start) + minified + source.slice(end + 1), loader: 'ts' }
-		})
+		build.onLoad({ filter: /src[\\/]widgetCss\.ts$/ }, async args => ({
+			contents: await minifyCssLiteral(args.path, 'export const FEEDBACK_CSS = `'),
+			loader: 'ts',
+		}))
+		build.onLoad({ filter: /src[\\/]plugins[\\/]user-test[\\/]ui\.ts$/ }, async args => ({
+			contents: await minifyCssLiteral(args.path, 'style.textContent = `'),
+			loader: 'ts',
+		}))
 	},
 }
 
