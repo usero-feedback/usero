@@ -1,5 +1,5 @@
 {
-	"version": "1.7.1",
+	"version": "1.7.2",
 	"sizes": {
 		"./dist/board.cjs": 521,
 		"./dist/board.js": 502,
@@ -9,8 +9,8 @@
 		"./dist/headless/react.js": 5882,
 		"./dist/plugins/session-replay.cjs": 12977,
 		"./dist/plugins/session-replay.js": 12745,
-		"./dist/plugins/user-test.cjs": 21244,
-		"./dist/plugins/user-test.js": 21219,
+		"./dist/plugins/user-test.cjs": 21450,
+		"./dist/plugins/user-test.js": 21421,
 		"./dist/react.cjs": 13878,
 		"./dist/react.js": 13875,
 		"./dist/replay.cjs": 12973,

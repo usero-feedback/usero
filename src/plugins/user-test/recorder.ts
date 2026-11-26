@@ -388,7 +388,7 @@ export function isStreamSilent(input: number | Float32Array | number[]): boolean
 	return rmsDb <= SILENCE_RMS_DB_THRESHOLD
 }
 
-function startSilenceMonitor(stream: MediaStream, onChange: (silent: boolean) => void, logger: PluginContext['logger']): SilenceMonitor | null {
+export function startSilenceMonitor(stream: MediaStream, onChange: (silent: boolean) => void, logger: PluginContext['logger']): SilenceMonitor | null {
 	const Ctor: typeof AudioContext | undefined =
 		typeof window !== 'undefined'
 			? (window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext)
@@ -398,19 +398,36 @@ function startSilenceMonitor(stream: MediaStream, onChange: (silent: boolean) =>
 	let audioCtx: AudioContext
 	let source: MediaStreamAudioSourceNode
 	let analyser: AnalyserNode
+	let sink: GainNode
 	try {
 		audioCtx = new Ctor()
 		source = audioCtx.createMediaStreamSource(stream)
 		analyser = audioCtx.createAnalyser()
 		analyser.fftSize = 2048
-		// We do not connect the analyser to audioCtx.destination: we only READ
-		// the track, never play it back (that would echo the participant's own
-		// mic into their speakers).
+		// WebKit only processes a graph that reaches destination; gain 0 keeps it inaudible (no echo).
+		sink = audioCtx.createGain()
+		sink.gain.value = 0
 		source.connect(analyser)
+		analyser.connect(sink)
+		sink.connect(audioCtx.destination)
 	} catch (err) {
 		logger.warn('silence monitor: failed to attach analyser', err)
 		return null
 	}
+
+	// Without a user gesture the context starts suspended (Safari) and reads all zeros.
+	const resume = (): void => {
+		audioCtx.resume().catch(() => {})
+	}
+	const gesture = (method: 'addEventListener' | 'removeEventListener'): void => {
+		for (const type of ['pointerdown', 'keydown']) window[method](type, onGesture, { capture: true, passive: true })
+	}
+	const onGesture = (): void => {
+		resume()
+		gesture('removeEventListener')
+	}
+	resume()
+	if (audioCtx.state !== 'running') gesture('addEventListener')
 
 	const buffer = new Float32Array(analyser.fftSize)
 	// Reported state (what the pill currently shows). Starts audible; we only
@@ -422,13 +439,17 @@ function startSilenceMonitor(stream: MediaStream, onChange: (silent: boolean) =>
 	let intervalId: ReturnType<typeof setInterval> | null = null
 
 	const tick = (): void => {
-		// getFloatTimeDomainData is widely supported; guard for older engines.
-		try {
-			analyser.getFloatTimeDomainData(buffer)
-		} catch {
-			return
+		// A non-running context reads zeros, so treat it as unknown (not silent).
+		let rawSilent = false
+		if (audioCtx.state === 'running') {
+			// getFloatTimeDomainData is widely supported; guard for older engines.
+			try {
+				analyser.getFloatTimeDomainData(buffer)
+			} catch {
+				return
+			}
+			rawSilent = isStreamSilent(buffer)
 		}
-		const rawSilent = isStreamSilent(buffer)
 		const now = Date.now()
 		if (rawSilent !== lastRaw) {
 			lastRaw = rawSilent
@@ -451,9 +472,11 @@ function startSilenceMonitor(stream: MediaStream, onChange: (silent: boolean) =>
 				clearInterval(intervalId)
 				intervalId = null
 			}
+			gesture('removeEventListener')
 			try {
 				source.disconnect()
 				analyser.disconnect()
+				sink.disconnect()
 			} catch {
 				// nodes may already be torn down
 			}

@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.7.2
+
+Patch. The user-test recorder no longer shows "Can't hear you, tap to recheck" on Safari while the voice is recording fine. A paid tester on Safari 26 saw it for his whole session while his transcript came through clean. Recording starts on page load, so the silence monitor's `AudioContext` started suspended with no user gesture, and WebKit also skips an analyser that is not connected to the output, so the monitor read all zeros. The monitor now routes the analyser through a muted gain node to the output (still silent, no echo), calls `resume()` at start and again on the first tap or key press, and never reports silence unless the context is running. `plugins/user-test` grows by 197 B gz (.js) and 200 B gz (.cjs). Every other entry is the same size. No change to submit, uploads or the wire format.
+
+`npm run perf` medians (5 runs, 250 ms latency, 4x CPU). This release does not change `vanilla` or `replay`, which the perf harness loads. The first run measured resume recordLongTask at 142 ms against its 140 ms budget with the machine under load; the rerun below passed.
+
+| Scenario | clickToPost | clickToSuccess | longTaskToSuccess | recordLongTask | linked |
+| --- | --- | --- | --- | --- | --- |
+| live | 18 ms | 302 ms | 0 ms | 135 ms | 5/5 |
+| snapshot | 5 ms | 280 ms | 0 ms | | 5/5 |
+| ask | 5 ms | 282 ms | 0 ms | | 5/5 |
+| resume | 13 ms | 293 ms | 0 ms | 138 ms | 5/5 |
+
 ## 1.7.1
 
 Patch. The user-test recorder now makes it obvious that a test is recording, and a stray tap can no longer end one. In round 1, 4 of 6 paid testers could not tell they were being recorded and started backup Loom or Zoom recordings, and one test ended 35 seconds in from a tap on Finish beside the Tasks button. **Recording pill on start:** when the mic goes live on a fresh start, a "Recording your screen and voice" pill with the pulsing red dot shows above the bar for 6 seconds (the fresh-start sibling of "Recording resumed", which is unchanged). It only shows when the mic is live; a blocked mic keeps its "Mic blocked, tap to retry" chip. **Red live chip:** the bar's "Recording" chip is tinted red for the whole test instead of neutral grey. Muted, connecting and mic-failed chips look the same as before. **Finish asks to confirm:** while recording, tapping Finish opens a small "Finish the test?" confirm just above the bar, with Keep going and a red Finish. It is part of the SDK's own UI, never `window.confirm`, so it matches the bar and never blocks the page being tested. Keep going has focus by default, and Keep going, Escape or a tap anywhere outside closes it while recording carries on. Only the red Finish ends the test. It is `role="alertdialog"` labelled by its question, focus moves into it on open, Tab swaps between the two buttons, and focus returns to the bar's Finish on close. Retry after a failed save is still one tap with no confirm. **Smaller bundle:** the recorder bar's stylesheet is now minified at build time, like the widget's, so `plugins/user-test` shrinks by 1210 B gz (.js) and 1212 B gz (.cjs) with all of the above included. Every other entry is byte-for-byte the same size. No change to submit, uploads or the wire format.
