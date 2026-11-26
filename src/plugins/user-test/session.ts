@@ -9,6 +9,7 @@ import {
 	ACTIVE_SESSION_STORAGE_KEY,
 	type ActiveSessionState,
 	type AdoptResult,
+	type EndedEarlyCopy,
 	type FinaliseNote,
 	type FinaliseResult,
 	type Logger,
@@ -239,17 +240,32 @@ export function parsePaymentSummary(raw: unknown): PaymentSummary | null {
 		qualified?: unknown
 		reward?: unknown
 		payoutEmail?: unknown
-		tasksDone?: unknown
 		tasksTotal?: unknown
+		exit?: unknown
 	}
 	if (typeof p.qualified !== 'boolean') return null
 	return {
 		qualified: p.qualified,
 		reward: typeof p.reward === 'string' ? p.reward : null,
 		payoutEmail: typeof p.payoutEmail === 'string' ? p.payoutEmail : null,
-		tasksDone: typeof p.tasksDone === 'number' ? p.tasksDone : 0,
 		tasksTotal: typeof p.tasksTotal === 'number' ? p.tasksTotal : 0,
+		exit: parseEndedEarlyCopy(p.exit),
 	}
+}
+
+// All six strings or nothing, so the screen never mixes server and fallback copy.
+function parseEndedEarlyCopy(raw: unknown): EndedEarlyCopy | null {
+	if (typeof raw !== 'object' || raw === null) return null
+	const r = raw as Record<string, unknown>
+	const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null)
+	const title = str(r.title)
+	const lede = str(r.lede)
+	const resumeNote = str(r.resumeNote)
+	const resumeLabel = str(r.resumeLabel)
+	const exitLabel = str(r.exitLabel)
+	const exitAcknowledgement = str(r.exitAcknowledgement)
+	if (!title || !lede || !resumeNote || !resumeLabel || !exitLabel || !exitAcknowledgement) return null
+	return { title, lede, resumeNote, resumeLabel, exitLabel, exitAcknowledgement }
 }
 
 export async function finaliseSession(

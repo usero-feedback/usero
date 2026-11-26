@@ -6,6 +6,7 @@
 
 import {
 	CLOCK_ICON_SVG,
+	type EndedEarlyCopy,
 	FLAG_ICON_SVG,
 	type IndicatorCallbacks,
 	MIC_ICON_SVG,
@@ -1287,41 +1288,31 @@ function renderPayout(card: HTMLElement, opts: ThanksOptions, reward: string | n
 	})
 }
 
+// Older servers send no copy; they only hold short or silent sessions, so this stays generic.
+const ENDED_EARLY_FALLBACK: EndedEarlyCopy = {
+	title: 'This session was a bit short',
+	lede: 'This test needs a longer recording than this one. You can pick up where you left off.',
+	resumeNote: 'Keep talking through what you see and do as you go.',
+	resumeLabel: 'Resume where I left off',
+	exitLabel: 'End here and send it for review',
+	exitAcknowledgement: 'Thanks for giving it a go. The researcher will look over your session and decide what happens next. You can close this tab now.',
+}
+
 function renderEndedEarly(card: HTMLElement, opts: ThanksOptions): void {
-	const payment = opts.payment
-	const done = payment?.tasksDone ?? 0
-	const total = payment?.tasksTotal ?? 0
-	const reward = payment?.reward ?? null
+	const copy = opts.payment?.exit ?? ENDED_EARLY_FALLBACK
 
 	const head = document.createElement('div')
 	head.className = 'head'
-	const lede = total > 0
-		? `We saw ${done} of ${total} ${total === 1 ? 'task' : 'tasks'} finished. No worries, you can pick up right where you left off.`
-		: 'It looks like the session ended before you finished. No worries, you can pick up where you left off.'
 	head.innerHTML = `
 		<div class="check early" aria-hidden="true">${CLOCK_ICON_SVG}</div>
-		<h2>Looks like you stopped early</h2>
-		<p class="lede">${lede}</p>
+		<h2>${escapeHtml(copy.title)}</h2>
+		<p class="lede">${escapeHtml(copy.lede)}</p>
 	`
 	card.appendChild(head)
 
-	// Per-task progress when we know the counts: done rows ticked, the rest hollow.
-	if (total > 0) {
-		const rows: Array<{ label: string; done: boolean }> = []
-		for (let i = 0; i < total; i += 1) {
-			rows.push({ label: `Task ${i + 1}`, done: i < done })
-		}
-		const list = document.createElement('div')
-		list.innerHTML = checksList(rows)
-		const ul = list.firstElementChild
-		if (ul) card.appendChild(ul)
-	}
-
 	const note = document.createElement('div')
 	note.className = 'early-note'
-	note.innerHTML = `${SPARK_ICON_SVG}<span><strong style="font-weight:600">Resume the test.</strong> ${
-		reward ? `Your ${escapeHtml(reward)} reward unlocks` : 'The reward unlocks'
-	} once all ${total > 0 ? total : 'the'} ${total === 1 ? 'task is' : 'tasks are'} done.</span>`
+	note.innerHTML = `${SPARK_ICON_SVG}<span><strong style="font-weight:600">Resume the test.</strong> ${escapeHtml(copy.resumeNote)}</span>`
 	card.appendChild(note)
 
 	const actions = document.createElement('div')
@@ -1329,11 +1320,11 @@ function renderEndedEarly(card: HTMLElement, opts: ThanksOptions): void {
 	const resume = document.createElement('button')
 	resume.type = 'button'
 	resume.className = 'resume-btn'
-	resume.textContent = 'Resume where I left off'
+	resume.textContent = copy.resumeLabel
 	const exit = document.createElement('button')
 	exit.type = 'button'
 	exit.className = 'exit-btn'
-	exit.textContent = "Thanks for trying. No reward this time since the tasks weren't finished."
+	exit.textContent = copy.exitLabel
 	actions.appendChild(resume)
 	actions.appendChild(exit)
 	card.appendChild(actions)
@@ -1347,7 +1338,7 @@ function renderEndedEarly(card: HTMLElement, opts: ThanksOptions): void {
 		card.innerHTML = ''
 		const sent = document.createElement('p')
 		sent.className = 'end-sent'
-		sent.textContent = 'Thanks for giving it a go. You can close this tab now.'
+		sent.textContent = copy.exitAcknowledgement
 		card.appendChild(sent)
 	})
 }

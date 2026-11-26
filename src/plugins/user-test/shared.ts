@@ -290,15 +290,25 @@ export interface FinaliseNote {
 // Participant-facing payment summary the finalise endpoint returns on the FIRST
 // call. Drives the finished screen: `qualified` picks the complete vs ended-early
 // layout, `reward` is the formatted headline (e.g. "$15"), `payoutEmail` seeds the
-// one-tap payout default, tasksDone/tasksTotal drive the ended-early missing line.
+// one-tap payout default, tasksTotal fills the complete screen's checklist, and
+// `exit` is the server's copy for the ended-early screen.
 // Every field is optional so an older server (no `payment` block) degrades to the
 // neutral "thanks, saved" screen rather than throwing.
 export interface PaymentSummary {
 	qualified: boolean
 	reward: string | null
 	payoutEmail: string | null
-	tasksDone: number
 	tasksTotal: number
+	exit: EndedEarlyCopy | null
+}
+
+export interface EndedEarlyCopy {
+	title: string
+	lede: string
+	resumeNote: string
+	resumeLabel: string
+	exitLabel: string
+	exitAcknowledgement: string
 }
 
 export interface FinaliseResult {

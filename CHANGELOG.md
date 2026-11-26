@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.7.3
+
+Patch. The user-test recorder's "ended early" screen now gives the real reason a session was held. A session under half the test's minimum length is held for the researcher to review rather than paid automatically, but the screen told testers their tasks weren't finished and that there was no reward. Tasks never gate payment, and the researcher can still pay a held session. The screen now renders the copy the server sends in `payment.exit`: for a short session, "This session was a bit short" with the test's minimum ("This test needs about 15 minutes"), Resume as the main action, and "End here and send it for review", which says the researcher will look over the session without promising or ruling out payment. A session with no audio gets a "We couldn't hear you" version that points at the mic. Older servers that send no copy get a generic short-session version. The per-task progress list is gone from this screen, since tasks were never the reason. `plugins/user-test` grows by 90 B gz (.js) and 88 B gz (.cjs). Every other entry is the same size. No change to submit or uploads; the finalise response gains an optional `exit` copy block, and `tasksDone` is no longer read.
+
+`npm run perf` medians (5 runs, 250 ms latency, 4x CPU). This release does not change `vanilla` or `replay`, which the perf harness loads.
+
+| Scenario | clickToPost | clickToSuccess | longTaskToSuccess | recordLongTask | linked |
+| --- | --- | --- | --- | --- | --- |
+| live | 18 ms | 295 ms | 0 ms | 124 ms | 5/5 |
+| snapshot | 4 ms | 277 ms | 0 ms | | 5/5 |
+| ask | 5 ms | 280 ms | 0 ms | | 5/5 |
+| resume | 10 ms | 286 ms | 0 ms | 130 ms | 5/5 |
+
 ## 1.7.2
 
 Patch. The user-test recorder no longer shows "Can't hear you, tap to recheck" on Safari while the voice is recording fine. A paid tester on Safari 26 saw it for his whole session while his transcript came through clean. Recording starts on page load, so the silence monitor's `AudioContext` started suspended with no user gesture, and WebKit also skips an analyser that is not connected to the output, so the monitor read all zeros. The monitor now routes the analyser through a muted gain node to the output (still silent, no echo), calls `resume()` at start and again on the first tap or key press, and never reports silence unless the context is running. `plugins/user-test` grows by 197 B gz (.js) and 200 B gz (.cjs). Every other entry is the same size. No change to submit, uploads or the wire format.
